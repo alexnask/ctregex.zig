@@ -1,4 +1,4 @@
-# Zig Comptile Time Regular Expression
+# Zig compile time regular expressions
 Generating fast code since 2020
 
 ## Features

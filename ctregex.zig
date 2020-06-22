@@ -34,22 +34,6 @@ fn checkAscii(comptime codepoint: u21) void {
     if (codepoint > 127) @compileError("Cannot match character '" ++ ctUtf8EncodeChar(codepoint) ++ "' in ascii mode.");
 }
 
-fn ctEncodeChar(comptime codepoint: u21, comptime encoding: Encoding) []const encoding.CharT() {
-    switch (encoding) {
-        .codepoint => return &[1]u21{codepoint},
-        .ascii => {
-            checkAscii(codepoint);
-            return &[1]u8{@truncate(u8, codepoint)};
-        },
-        .utf8 => return ctUtf8EncodeChar(codepoint),
-        .utf16le => {
-            var buf: [2]u16 = undefined;
-            const utf8_c = ctUtf8EncodeChar(c);
-            return buf[0 .. std.unicode.utf8ToUtf16Le(&buf, utf8_c) catch unreachable];
-        },
-    }
-}
-
 fn charLenInEncoding(comptime codepoint: u21, comptime encoding: Encoding) usize {
     switch (encoding) {
         .ascii => {

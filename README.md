@@ -20,7 +20,8 @@ Generating fast code since 2020
 ```zig
 test "runtime matching" {
     @setEvalBranchQuota(1250);
-    if (try match("(?<test>def|abc)([😇ω])+", .{}, "abc😇ωωωωω")) |res| {
+    // The encoding is utf8 by default, you can use .ascii, .utf16le, .codepoint here instead.
+    if (try match("(?<test>def|abc)([😇ω])+", .{.encoding = .utf8}, "abc😇ωωωωω")) |res| {
         std.debug.warn("Test: {}, 1: {}\n", .{ res.capture("test"), res.captures[1] });
     }
 }

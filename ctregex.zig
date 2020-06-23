@@ -71,11 +71,16 @@ fn ctEncode(comptime str: []const u21, comptime encoding: Encoding) []const enco
     return &result;
 }
 
+fn ctIntStr(comptime int: var) []const u8 {
+    var buf: [16]u8 = undefined;
+    return std.fmt.bufPrint(&buf, "{}", .{int}) catch unreachable;
+}
+
 /// Regex grammar
 /// ```
 /// root ::= expr?
 /// expr ::= subexpr ('|' expr)?
-/// subexpr ::= atom ('*' | '+' | '?')? subexpr?
+/// subexpr ::= atom ('*' | '+' | '?' | ('{' digit+ (',' (digit+)?)? '}'))? subexpr?
 /// atom ::= grouped | brackets | '.' | char_class | '\' special | '\' | rest_char
 /// grouped ::= '(' ('?' (':' | ('<' ascii_ident '>'))? expr ')'
 /// brackets ::= '[' '^'? (brackets_rule)+ ']'
@@ -83,7 +88,7 @@ fn ctEncode(comptime str: []const u21, comptime encoding: Encoding) []const enco
 /// brackets_atom ::= ('\' special_brackets | '\' | rest_brackets)+
 /// special_brackets ::= '-' | ']' | '^'
 /// rest_brackets ::=  <char>-special_brackets
-/// special ::= '.' | '[' | ']'| '(' | ')' | '|' | '*' | '+' | '?' | '^'
+/// special ::= '.' | '[' | ']'| '(' | ')' | '|' | '*' | '+' | '?' | '^' | '{' | '}'
 /// rest_char ::= <char>-special
 /// char_class ::= '\d' | '\s'
 /// ```
@@ -239,17 +244,44 @@ const RegexParser = struct {
     }
 
     const modifiers = .{ '*', '+', '?' };
-    const special_chars = .{ '.', '[', ']', '(', ')', '|', '*', '+', '?', '^' };
+    const special_chars = .{ '.', '[', ']', '(', ')', '|', '*', '+', '?', '^', '{', '}' };
 
-    // subexpr ::= atom ('*' | '+' | '?')? subexpr?
+    // subexpr ::= atom ('*' | '+' | '?' | ('{' digit+ (',' (digit+)?)? '}'))? subexpr?
     fn parseSubExpr(comptime parser: *RegexParser) ?SubExpr {
         const atom = parser.parseAtom() orelse return null;
         parser.skipWhitespace();
 
         var lhs = SubExpr{ .atom = .{ .data = atom } };
         if (parser.consumeOneOf(modifiers)) |mod| {
-            lhs.atom.mod = mod;
+            lhs.atom.mod = .{ .char = mod };
             parser.skipWhitespace();
+        } else if (parser.consumeChar('{')) {
+            parser.skipWhitespace();
+            const min_reps = parser.parseNaturalNum();
+            parser.skipWhitespace();
+            if (parser.consumeChar(',')) {
+                parser.skipWhitespace();
+                const max_reps = if (parser.maybeParseNaturalNum()) |reps| block: {
+                    if (reps <= min_reps)
+                        parser.raiseError("Expected repetition upper bound to be greater or equal to {}", .{min_reps});
+                    break :block reps;
+                } else 0;
+                lhs.atom.mod = .{
+                    .repetitions_range = .{
+                        .min = min_reps,
+                        .max = max_reps,
+                    },
+                };
+            } else {
+                if (min_reps == 0) parser.raiseError("Exactly zero repetitions requested...", .{});
+
+                lhs.atom.mod = .{
+                    .exact_repetitions = min_reps,
+                };
+            }
+            parser.skipWhitespace();
+            if (!parser.consumeChar('}'))
+                parser.raiseError("Expected closing '}' after repetition modifier", .{});
         }
 
         if (parser.parseSubExpr()) |rhs| {
@@ -283,7 +315,7 @@ const RegexParser = struct {
                 return Atom{ .char_class = class };
             }
 
-            // special := '.' | '[' | ']'| '(' | ')' | '|' | '*' | '+' | '?' | '^'
+            // special := '.' | '[' | ']'| '(' | ')' | '|' | '*' | '+' | '?' | '^' | '{' | '}'
             if (parser.consumeOneOf(special_chars ++ .{ ' ', '\t', '\\' })) |c| {
                 str = str ++ &[1]u21{c};
                 break :block;
@@ -305,8 +337,9 @@ const RegexParser = struct {
                     break :charLoop;
                 }
                 parser.raiseError("Invalid character '{}' after escape \\", .{parser.peek()});
-            } else if (parser.peekOneOf(modifiers) != null) {
+            } else if (parser.peekOneOf(modifiers ++ .{'{'}) != null) {
                 if (str.len == 1) return Atom{ .literal = str };
+                if (str.len == 0) parser.raiseError("Stray modifier character '{}' applies to no expression", .{parser.peek()});
                 parser.iterator.i -= std.unicode.utf8CodepointSequenceLength(str[str.len - 1]) catch unreachable;
                 return Atom{ .literal = str[0 .. str.len - 1] };
             }
@@ -329,6 +362,22 @@ const RegexParser = struct {
             if (c > 127 or (c != '_' and !std.ascii.isAlNum(@truncate(u8, c))))
                 break :readChars;
             res = res ++ &[1]u8{@truncate(u8, parser.iterator.nextCodepoint() orelse unreachable)};
+        }
+        return res;
+    }
+
+    fn parseNaturalNum(comptime parser: *RegexParser) usize {
+        return parser.maybeParseNaturalNum() orelse parser.raiseError("Expected natural number", .{});
+    }
+
+    fn maybeParseNaturalNum(comptime parser: *RegexParser) ?usize {
+        var c = parser.peek() orelse return null;
+        if (c > 127 or !std.ascii.isDigit(@truncate(u8, c))) return null;
+        var res: usize = (parser.iterator.nextCodepoint() orelse unreachable) - '0';
+        readChars: while (true) {
+            c = parser.peek() orelse break :readChars;
+            if (c > 127 or !std.ascii.isDigit(@truncate(u8, c))) break :readChars;
+            res = res * 10 + ((parser.iterator.nextCodepoint() orelse unreachable) - '0');
         }
         return res;
     }
@@ -429,7 +478,16 @@ const RegexParser = struct {
     const SubExpr = union(enum) {
         atom: struct {
             data: Atom,
-            mod: ?u8 = null,
+            mod: union(enum) {
+                char: u8,
+                exact_repetitions: usize,
+                repetitions_range: struct {
+                    min: usize,
+                    /// Zero for max means unbounded
+                    max: usize,
+                },
+                none,
+            } = .none,
         },
         concat: struct {
             lhs: *const SubExpr,
@@ -440,8 +498,14 @@ const RegexParser = struct {
             switch (self) {
                 .atom => |atom| {
                     const atom_str = atom.data.ctStr();
-                    if (atom.mod) |mod| {
-                        return atom_str ++ &[1]u8{mod};
+                    switch (atom.mod) {
+                        .none => {},
+                        .exact_repetitions => |reps| return atom_str ++ "{" ++ ctIntStr(reps) ++ "}",
+                        .repetitions_range => |range| return atom_str ++ "{" ++ ctIntStr(range.min) ++ if (range.max == 0)
+                            ",<inf>}"
+                        else
+                            (", " ++ ctIntStr(range.max) ++ "}"),
+                        .char => |c| return atom_str ++ &[1]u8{c},
                     }
                     return atom_str;
                 },
@@ -453,16 +517,19 @@ const RegexParser = struct {
         }
 
         fn minLen(comptime self: SubExpr, comptime encoding: Encoding) usize {
-            return switch (self) {
+            switch (self) {
                 .atom => |atom| block: {
-                    if (atom.mod) |mod| {
-                        if (mod == '*' or mod == '?')
-                            return 0;
+                    const atom_min_len = atom.data.minLen(encoding);
+                    switch (atom.mod) {
+                        .char => |c| if (c == '*' or c == '?') return 0,
+                        .exact_repetitions => |reps| return reps * atom_min_len,
+                        .repetitions_range => |range| return range.min * atom_min_len,
+                        .none => {},
                     }
-                    break :block atom.data.minLen(encoding);
+                    return atom_min_len;
                 },
-                .concat => |concat| concat.lhs.minLen(encoding) + concat.rhs.minLen(encoding),
-            };
+                .concat => |concat| return concat.lhs.minLen(encoding) + concat.rhs.minLen(encoding),
+            }
         }
     };
 
@@ -725,8 +792,10 @@ inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options:
 
     switch (sub_expr) {
         .atom => |atom| {
-            if (atom.mod) |mod| {
-                switch (mod) {
+            switch (atom.mod) {
+                .none => return try matchAtom(atom.data, options, str, result),
+                .char => |c| switch (c) {
+                    // TODO Abstract this somehow?
                     '*' => {
                         if (try matchAtom(atom.data, options, str, result)) |ret_slice| {
                             var curr_slice: @TypeOf(str) = str[0..ret_slice.len];
@@ -750,9 +819,45 @@ inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options:
                         return (try matchAtom(atom.data, options, str, result)) orelse str[0..0];
                     },
                     else => unreachable,
-                }
-            } else {
-                return try matchAtom(atom.data, options, str, result);
+                },
+                .exact_repetitions => |reps| {
+                    var curr_slice: @TypeOf(str) = str[0..0];
+                    // TODO Using an inline while here crashes the compiler in codegen
+                    var curr_rep: usize = reps;
+                    while (curr_rep > 0) : (curr_rep -= 1) {
+                        if (try matchAtom(atom.data, options, str[curr_slice.len..], result)) |matched_slice| {
+                            curr_slice = str[0 .. matched_slice.len + curr_slice.len];
+                        } else return null;
+                    }
+                    return curr_slice;
+                },
+                .repetitions_range => |range| {
+                    var curr_slice: @TypeOf(str) = str[0..0];
+                    // Do minimum reps
+                    // TODO Using an inline while here crashes the compiler in codegen
+                    var curr_rep: usize = 0;
+                    while (curr_rep < range.min) : (curr_rep += 1) {
+                        if (try matchAtom(atom.data, options, str[curr_slice.len..], result)) |matched_slice| {
+                            curr_slice = str[0 .. matched_slice.len + curr_slice.len];
+                        } else return null;
+                    }
+
+                    // 0 maximum reps means keep going on forever
+                    if (range.max == 0) {
+                        while (try matchAtom(atom.data, options, str[curr_slice.len..], result)) |matched_slice| {
+                            curr_slice = str[0 .. matched_slice.len + curr_slice.len];
+                        }
+                    } else {
+                        // TODO Using an inline while here crashes the compiler in codegen
+                        var curr_additional_rep: usize = 0;
+                        while (curr_rep < range.max) : (curr_rep += 1) {
+                            if (try matchAtom(atom.data, options, str[curr_slice.len..], result)) |matched_slice| {
+                                curr_slice = str[0 .. matched_slice.len + curr_slice.len];
+                            } else return curr_slice;
+                        }
+                    }
+                    return curr_slice;
+                },
             }
         },
         .concat => |concat| {

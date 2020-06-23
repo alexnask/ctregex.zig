@@ -62,12 +62,15 @@ fn testCaptures(comptime regex: []const u8, comptime encoding: ctregex.Encoding,
 }
 
 test "regex matching" {
-    @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(2550);
     try testMatch("abc|def", .ascii, "abc");
     try testMatch("abc|def", .ascii, "def");
     try testMatch("[Α-Ω][α-ω]+", .utf8, "Αλεξανδρος");
     try testMatch("[Α-Ω][α-ω]+", .utf16le, "Αλεξανδρος");
     try testMatch("[Α-Ω][α-ω]+", .codepoint, "Αλεξανδρος");
+    try testMatch("[^a-z]{1,}", .ascii, "ABCDEF");
+    try testMatch("[^a-z]{1,3}", .ascii, "ABC");
+    try testMatch("Smile|(😀 | 😊){2}", .utf8, "😊😀");
 
     try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "no capture", &[_]?[]const u8{
         null, null

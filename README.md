@@ -6,14 +6,14 @@ Generating fast code since 2020
 - Comptime and runtime matching
 - UTF8, UTF16le, ASCII, codepoint array support
 - Captures (with named `(:<name>...)` support)
-- `|`, `*`, `+`, `?`, `(:?...)`, `[...]`, `[^...]`
+- `|`, `*`, `+`, `?`, `(:?...)`, `[...]`, `[^...]`, `{N}`, `{min,}`, `{min,max}`
 - '\d', '\s' character classes
 
 ## TODO
 - Faster generated code using DFAs when possible
 - search, findAll, etc.
 - More character classes
-- More features (backreferences, `{N}`, etc.)
+- More features (backreferences etc.)
 
 ## Example
 

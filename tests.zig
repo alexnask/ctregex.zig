@@ -28,6 +28,20 @@ fn testMatch(comptime regex: []const u8, comptime encoding: ctregex.Encoding, co
     comptime expect((try ctregex.match(regex, .{.encoding = encoding}, encoded_str)) != null);
 }
 
+fn testSearchInner(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const encoding.CharT(), comptime found: []const encoding.CharT()) !void {
+    const result = try ctregex.search(regex, .{.encoding = encoding}, str);
+    expect(result != null);
+    expect(std.mem.eql(encoding.CharT(), result.?.slice, found));
+}
+
+fn testSearch(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const u8, comptime found: []const u8) !void {
+    const encoded_str = comptime encodeStr(encoding, str);
+    const encoded_found = comptime encodeStr(encoding, found);
+
+    try testSearchInner(regex, encoding, encoded_str, encoded_found);
+    comptime try testSearchInner(regex, encoding, encoded_str, encoded_found);
+}
+
 fn testCapturesInner(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const encoding.CharT(), comptime captures: []const ?[]const encoding.CharT()) !void {
     const result = try ctregex.match(regex, .{.encoding = encoding}, str);
     expect(result != null);
@@ -83,3 +97,10 @@ test "regex matching" {
     });
 }
 
+test "regex searching" {
+    @setEvalBranchQuota(3800);
+    try testSearch("foo|bar", .ascii, "some very interesting test string including foobar.", "foo");
+    try testSearch("(abc|αβγ)+", .utf8, "a lorem ipsum αβγαβγαβγ abcabc", "αβγαβγαβγ");
+    try testSearch("(abc|αβγ)+", .utf16le, "a lorem ipsum αβγαβγαβγ abcabc", "αβγαβγαβγ");
+    try testSearch("(abc|αβγ)+", .codepoint, "a lorem ipsum αβγαβγαβγ abcabc", "αβγαβγαβγ");
+}

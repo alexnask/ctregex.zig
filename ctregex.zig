@@ -910,6 +910,10 @@ pub fn MatchResult(comptime regex: []const u8, comptime options: MatchOptions) t
             slice: []const CharT,
             captures: [capture_len]?[]const CharT = [1]?[]const CharT{null} ** capture_len,
 
+            inline fn resetCaptures(self: *Self) void {
+                self.captures = [1]?[]const CharT{null} ** capture_len;
+            }
+
             pub usingnamespace if (capture_len != 0)
                 struct {
                     pub fn capture(self: Self, comptime name: []const u8) ?[]const CharT {
@@ -946,6 +950,27 @@ pub fn match(comptime regex: []const u8, comptime options: MatchOptions, str: []
     return {};
 }
 
-// TODO search, findAll, etc.
+pub fn search(comptime regex: []const u8, comptime options: MatchOptions, str: []const options.encoding.CharT()) !?MatchResult(regex, options) {
+    if (comptime RegexParser.parse(regex)) |parsed| {
+        var result: MatchResult(regex, options) = .{
+            .slice = undefined,
+        };
+        const min_len = comptime parsed.root.minLen(options.encoding);
+        // TODO Better strategy.
+        var start_idx: usize = 0;
+        while (start_idx < (str.len - min_len)) : (start_idx += 1) {
+            if (try matchExpr(parsed.root, options, str[start_idx..], &result)) |slice| {
+                result.slice = slice;
+                return result;
+            }
+            result.resetCaptures();
+        }
+        return null;
+    }
+
+    return {};
+}
+
+// TODO findAll, etc.
 // TODO Convert to DFA when we can (otherwise some mix of DFA + DFS?)
 // TODO More features, aim for PCRE compatibility

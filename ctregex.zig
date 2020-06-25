@@ -956,6 +956,7 @@ pub fn search(comptime regex: []const u8, comptime options: MatchOptions, str: [
             .slice = undefined,
         };
         const min_len = comptime parsed.root.minLen(options.encoding);
+        if (str.len < min_len) return null;
         // TODO Better strategy.
         var start_idx: usize = 0;
         while (start_idx < (str.len - min_len)) : (start_idx += 1) {

@@ -959,8 +959,12 @@ pub fn search(comptime regex: []const u8, comptime options: MatchOptions, str: [
         if (str.len < min_len) return null;
         // TODO Better strategy.
         var start_idx: usize = 0;
-        while (start_idx < (str.len - min_len)) : (start_idx += 1) {
-            if (try matchExpr(parsed.root, options, str[start_idx..], &result)) |slice| {
+        while (start_idx <= (str.len - min_len)) : (start_idx += 1) {
+            if (matchExpr(parsed.root, options, str[start_idx..], &result) catch |err| {
+                if (options.encoding == .utf8 and err == error.Utf8InvalidStartByte) continue;
+                if (options.encoding == .utf16le and err == error.UnexpectedSecondSurrogateHalf) continue;
+                return err;
+            }) |slice| {
                 result.slice = slice;
                 return result;
             }
@@ -975,3 +979,4 @@ pub fn search(comptime regex: []const u8, comptime options: MatchOptions, str: [
 // TODO findAll, etc.
 // TODO Convert to DFA when we can (otherwise some mix of DFA + DFS?)
 // TODO More features, aim for PCRE compatibility
+// TODO Add an ignoreUnicodeErrros option

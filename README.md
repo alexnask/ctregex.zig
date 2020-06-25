@@ -34,4 +34,5 @@ test "comptime matching" {
 }
 ```
 
-See tests.zig for more examples.
+See tests.zig for more examples.  
+[Small benchmark with ctregex, PCRE2](https://gist.github.com/alexnask/c537360ae0163863564fba6e660f442b)  

@@ -71,7 +71,7 @@ fn ctEncode(comptime str: []const u21, comptime encoding: Encoding) []const enco
     return &result;
 }
 
-fn ctIntStr(comptime int: var) []const u8 {
+fn ctIntStr(comptime int: anytype) []const u8 {
     var buf: [16]u8 = undefined;
     return std.fmt.bufPrint(&buf, "{}", .{int}) catch unreachable;
 }
@@ -125,7 +125,7 @@ const RegexParser = struct {
         return next;
     }
 
-    fn peekOneOf(comptime parser: *RegexParser, chars: var) ?u21 {
+    fn peekOneOf(comptime parser: *RegexParser, chars: anytype) ?u21 {
         const c = parser.peek() orelse return null;
         for (chars) |candidate| {
             if (c == candidate) return c;
@@ -137,7 +137,7 @@ const RegexParser = struct {
         return parser.iterator.i >= parser.iterator.bytes.len;
     }
 
-    fn consumeNotOneOf(comptime parser: *RegexParser, chars: var) ?u21 {
+    fn consumeNotOneOf(comptime parser: *RegexParser, chars: anytype) ?u21 {
         const c = parser.peek() orelse return null;
         for (chars) |candidate| {
             if (c == candidate) return null;
@@ -145,7 +145,7 @@ const RegexParser = struct {
         return parser.iterator.nextCodepoint().?;
     }
 
-    fn consumeOneOf(comptime parser: *RegexParser, chars: var) ?u21 {
+    fn consumeOneOf(comptime parser: *RegexParser, chars: anytype) ?u21 {
         const c = parser.peek() orelse return null;
         for (chars) |candidate| {
             if (c == candidate) {
@@ -164,7 +164,7 @@ const RegexParser = struct {
         return false;
     }
 
-    fn raiseError(comptime parser: *RegexParser, comptime fmt: []const u8, args: var) void {
+    fn raiseError(comptime parser: *RegexParser, comptime fmt: []const u8, args: anytype) void {
         var start_idx: usize = 0;
         while (parser.iterator.i - start_idx >= 40) {
             start_idx += std.unicode.utf8ByteSequenceLength(parser.iterator.bytes[start_idx]) catch unreachable;
@@ -191,7 +191,7 @@ const RegexParser = struct {
         const line_suffix = if (end_idx == parser.iterator.bytes.len) "\n" else " [...]\n";
 
         const ArgTuple = struct {
-            tuple: var = .{},
+            tuple: anytype= .{},
         };
         var arg_list = ArgTuple{};
         for (args) |arg| {
@@ -723,7 +723,7 @@ inline fn readCharClass(comptime class: u21, comptime options: MatchOptions, str
     }
 }
 
-inline fn matchAtom(comptime atom: RegexParser.Atom, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: var) !?@TypeOf(str) {
+inline fn matchAtom(comptime atom: RegexParser.Atom, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) !?@TypeOf(str) {
     const min_len = comptime atom.minLen(options.encoding);
     if (str.len < min_len) return null;
 
@@ -786,7 +786,7 @@ inline fn matchAtom(comptime atom: RegexParser.Atom, comptime options: MatchOpti
     }
 }
 
-inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: var) !?@TypeOf(str) {
+inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) !?@TypeOf(str) {
     const min_len = comptime sub_expr.minLen(options.encoding);
     if (str.len < min_len) return null;
 
@@ -873,7 +873,7 @@ inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options:
     return null;
 }
 
-inline fn matchExpr(comptime expr: RegexParser.Expr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: var) !?@TypeOf(str) {
+inline fn matchExpr(comptime expr: RegexParser.Expr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) !?@TypeOf(str) {
     const min_len = comptime expr.minLen(options.encoding);
     if (str.len < min_len) return null;
 

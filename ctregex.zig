@@ -518,7 +518,7 @@ const RegexParser = struct {
 
         fn minLen(comptime self: SubExpr, comptime encoding: Encoding) usize {
             switch (self) {
-                .atom => |atom| block: {
+                .atom => |atom| {
                     const atom_min_len = atom.data.minLen(encoding);
                     switch (atom.mod) {
                         .char => |c| if (c == '*' or c == '?') return 0,

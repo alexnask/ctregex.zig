@@ -688,7 +688,7 @@ pub const Encoding = enum {
     }
 };
 
-inline fn readOneChar(comptime options: MatchOptions, str: []const options.encoding.CharT()) !@TypeOf(str) {
+fn readOneChar(comptime options: MatchOptions, str: []const options.encoding.CharT()) callconv(.Inline) !@TypeOf(str) {
     switch (options.encoding) {
         .ascii, .codepoint => return str[0..1],
         .utf8 => return str[0..try std.unicode.utf8ByteSequenceLength(str[0])],
@@ -696,7 +696,7 @@ inline fn readOneChar(comptime options: MatchOptions, str: []const options.encod
     }
 }
 
-inline fn inCharClass(comptime class: u21, cp: u21) bool {
+fn inCharClass(comptime class: u21, cp: u21) callconv(.Inline) bool {
     switch (class) {
         'd' => return cp >= '0' and cp <= '9',
         's' => {
@@ -707,7 +707,7 @@ inline fn inCharClass(comptime class: u21, cp: u21) bool {
     }
 }
 
-inline fn readCharClass(comptime class: u21, comptime options: MatchOptions, str: []const options.encoding.CharT()) ?@TypeOf(str) {
+fn readCharClass(comptime class: u21, comptime options: MatchOptions, str: []const options.encoding.CharT()) callconv(.Inline) ?@TypeOf(str) {
     switch (class) {
         'd' => {
             switch (options.encoding) {
@@ -723,7 +723,7 @@ inline fn readCharClass(comptime class: u21, comptime options: MatchOptions, str
     }
 }
 
-inline fn matchAtom(comptime atom: RegexParser.Atom, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) !?@TypeOf(str) {
+fn matchAtom(comptime atom: RegexParser.Atom, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) callconv(.Inline) !?@TypeOf(str) {
     const min_len = comptime atom.minLen(options.encoding);
     if (str.len < min_len) return null;
 
@@ -786,7 +786,7 @@ inline fn matchAtom(comptime atom: RegexParser.Atom, comptime options: MatchOpti
     }
 }
 
-inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) !?@TypeOf(str) {
+fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) callconv(.Inline) !?@TypeOf(str) {
     const min_len = comptime sub_expr.minLen(options.encoding);
     if (str.len < min_len) return null;
 
@@ -873,7 +873,7 @@ inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options:
     return null;
 }
 
-inline fn matchExpr(comptime expr: RegexParser.Expr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) !?@TypeOf(str) {
+fn matchExpr(comptime expr: RegexParser.Expr, comptime options: MatchOptions, str: []const options.encoding.CharT(), result: anytype) callconv(.Inline) !?@TypeOf(str) {
     const min_len = comptime expr.minLen(options.encoding);
     if (str.len < min_len) return null;
 
@@ -910,7 +910,7 @@ pub fn MatchResult(comptime regex: []const u8, comptime options: MatchOptions) t
             slice: []const CharT,
             captures: [capture_len]?[]const CharT = [1]?[]const CharT{null} ** capture_len,
 
-            inline fn resetCaptures(self: *Self) void {
+            fn resetCaptures(self: *Self) callconv(.Inline) void {
                 self.captures = [1]?[]const CharT{null} ** capture_len;
             }
 

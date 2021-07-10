@@ -1,0 +1,13 @@
+pkgs:
+  ctregex:
+    version: 0.0.0
+    description: "Compile time regular expressions in zig"
+    source_url: "https://github.com/alexnask/ctregex.zig"
+    tags:
+      regex
+      compile-time
+
+    root: ctregex.zig
+    files:
+      README.md
+      tests.zig

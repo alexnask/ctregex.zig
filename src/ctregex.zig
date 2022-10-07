@@ -1,6 +1,7 @@
 const std = @import("std");
 const unicode = @import("unicode.zig");
 const LL = @import("ll.zig");
+const FiniteAutomaton = @import("finite_automaton.zig");
 
 const ctUtf8EncodeChar = unicode.ctUtf8EncodeChar;
 const Encoding = unicode.Encoding;
@@ -67,7 +68,11 @@ const PcreGrammar = struct {
         return .{ .reject = std.fmt.bufPrint(&buff, fmt, values) catch unreachable };
     }
 
-    pub fn applyAction(comptime act: Symbol.Action, comptime prev_term: u21, comptime subject: []const Subject) []const Subject {
+    pub fn applyAction(
+        comptime act: Symbol.Action,
+        comptime prev_term: u21,
+        comptime subject: []const Subject,
+    ) []const Subject {
         return switch (act) {
             .char => &[1]Subject{.{ .char = prev_term }} ++ subject,
             // .concat and .alt check for existing symbols they can just add to, otherwise they create it and invert
@@ -138,5 +143,3 @@ const PcreGrammar = struct {
 test "PcreGrammar" {
     _ = comptime LL.parse(PcreGrammar, "abc(def)*");
 }
-
-// @TODO Split this stuff into unicode.zig or smth

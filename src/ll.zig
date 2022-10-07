@@ -10,7 +10,7 @@ pub fn Move(comptime Symbol: type) type {
     };
 }
 
-// TODO Tests
+// TODO: Tests
 /// Parse `str` into an AST type based on `Grammar`
 pub fn parse(comptime Grammar: type, comptime str: [:0]const u8) []const Grammar.Subject {
     var stack: []const Grammar.Symbol = &.{Grammar.start_symbol};
@@ -34,7 +34,7 @@ pub fn parse(comptime Grammar: type, comptime str: [:0]const u8) []const Grammar
         const cp_len = std.unicode.utf8ByteSequenceLength(str[str_idx]) catch @compileError("Invalid utf8 sequence");
         const term = std.unicode.utf8Decode(str[str_idx..][0..cp_len]) catch @compileError("Invalid utf8 sequence");
 
-        // Look up result in parsing table
+        // Look up the resulting move in the grammar's parsing table and apply it
         switch (Grammar.table(symbol, term)) {
             .push_epsilon => {},
             .push => |v| stack = v ++ stack,
@@ -43,7 +43,7 @@ pub fn parse(comptime Grammar: type, comptime str: [:0]const u8) []const Grammar
                 str_idx += cp_len;
                 prev_term = term;
             },
-            // @TODO Show error location
+            // TODO: Show error location
             .reject => |msg| @compileError("Parsing error: " ++ msg),
             .accept => return subject,
         }

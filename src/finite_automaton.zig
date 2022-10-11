@@ -437,12 +437,34 @@ pub fn singleCharBoundInEncoding(comptime self: Self, comptime encoding: Encodin
     };
 }
 
+fn leadsToFinal(
+    comptime self: Self,
+    comptime state: usize,
+    comptime visited: []const usize,
+) bool {
+    if (self.isFinal(state)) return true;
+    const state_visited = for (visited) |v| {
+        if (v == state) break true;
+    } else false;
+    // We hit a cycle
+    if (state_visited) return false;
+
+    for (self.transitionsFrom(state)) |t| {
+        if (self.isFinal(t.target)) return true;
+        if (t.source == t.target) continue;
+        if (self.leadsToFinal(t.target, visited ++ &[1]usize{state})) return true;
+    }
+    return false;
+}
+
 pub fn removeDeadStates(comptime self: Self) Self {
+    // We find all states reachable from transitions from the start state,
+    //   and mark them as reachable if they lead to a final state.
     var state_reachable: []bool = b: {
         var res = [1]bool{true};
         break :b &res;
     };
-    var max_state = 0;
+    var max_state: usize = 0;
     for (self.transitions) |t| {
         if (t.target > max_state) max_state = t.target;
         if (t.source > max_state) max_state = t.source;
@@ -455,8 +477,10 @@ pub fn removeDeadStates(comptime self: Self) Self {
                 break :b &new_arr;
             };
 
-        if (state_reachable[t.source])
+        // We also filter out states which do not lead to any final state through any transition
+        if (state_reachable[t.source] and self.leadsToFinal(t.target, &.{t.source})) {
             state_reachable[t.target] = true;
+        }
     }
 
     // Map from current states to new states
@@ -528,11 +552,11 @@ fn isFinal(comptime self: Self, comptime state: usize) bool {
         if (s > state) return false;
         if (s == state) return true;
     }
-    unreachable;
+    return false;
 }
 
 pub fn size(comptime self: Self) usize {
-    var max = 0;
+    var max: usize = 0;
     for (self.transitions) |t| {
         if (t.target > max) max = t.target;
         if (t.source > max) max = t.source;
@@ -541,7 +565,6 @@ pub fn size(comptime self: Self) usize {
 }
 
 /// Assumes `sources` is sorted
-// Make this an iterator that accumulates.. is this possible without ++ ?
 fn transitionsFromMulti(comptime self: Self, comptime sources: []const usize) []Transition {
     var res: []Transition = &.{};
     var idx: usize = 0;
@@ -625,17 +648,17 @@ fn expectEqualAutomata(comptime expected: Self, comptime actual: Self) !void {
 test "Test automaton building blocks" {
     comptime {
         const a = single('a');
-        try expectEqualAutomata(a, .{ .final_states = &.{1}, .transitions = &.{
+        try expectEqualAutomata(.{ .final_states = &.{1}, .transitions = &.{
             .{
                 .source = 0,
                 .target = 1,
                 .input = .{ .single = 'a' },
             },
-        } });
+        } }, a);
 
         const b = single('b');
         const @"a·b" = concat(a, b).removeDeadStates();
-        try expectEqualAutomata(@"a·b", .{ .final_states = &.{2}, .transitions = &.{
+        try expectEqualAutomata(.{ .final_states = &.{2}, .transitions = &.{
             .{
                 .source = 0,
                 .target = 1,
@@ -646,10 +669,10 @@ test "Test automaton building blocks" {
                 .target = 2,
                 .input = .{ .single = 'b' },
             },
-        } });
+        } }, @"a·b");
 
         const @"a|b" = alt(a, b).removeDeadStates();
-        try expectEqualAutomata(@"a|b", .{ .final_states = &.{ 1, 2 }, .transitions = &.{
+        try expectEqualAutomata(.{ .final_states = &.{ 1, 2 }, .transitions = &.{
             .{
                 .source = 0,
                 .target = 1,
@@ -660,19 +683,19 @@ test "Test automaton building blocks" {
                 .target = 2,
                 .input = .{ .single = 'b' },
             },
-        } });
+        } }, @"a|b");
 
         const @"a?" = opt(a).removeDeadStates();
-        try expectEqualAutomata(@"a?", .{ .final_states = &.{ 0, 1 }, .transitions = &.{
+        try expectEqualAutomata(.{ .final_states = &.{ 0, 1 }, .transitions = &.{
             .{
                 .source = 0,
                 .target = 1,
                 .input = .{ .single = 'a' },
             },
-        } });
+        } }, @"a?");
 
         const @"a*" = star(a).removeDeadStates();
-        try expectEqualAutomata(@"a*", .{ .final_states = &.{ 0, 1 }, .transitions = &.{
+        try expectEqualAutomata(.{ .final_states = &.{ 0, 1 }, .transitions = &.{
             .{
                 .source = 0,
                 .target = 1,
@@ -683,10 +706,10 @@ test "Test automaton building blocks" {
                 .target = 1,
                 .input = .{ .single = 'a' },
             },
-        } });
+        } }, @"a*");
 
         const @"a+" = plus(a).removeDeadStates();
-        try expectEqualAutomata(@"a+", .{ .final_states = &.{1}, .transitions = &.{
+        try expectEqualAutomata(.{ .final_states = &.{1}, .transitions = &.{
             .{
                 .source = 0,
                 .target = 1,
@@ -697,159 +720,266 @@ test "Test automaton building blocks" {
                 .target = 1,
                 .input = .{ .single = 'a' },
             },
-        } });
+        } }, @"a+");
     }
 }
 
-const NewState = struct {
-    old_states: []const usize,
-};
+// TODO: Move to some utility.zig file
+fn CtSortedList(comptime T: type) type {
+    return struct {
+        items: []const T = &.{},
 
-// Cache this based on the slice contents somehow
-fn newState(
-    comptime new_states: *[]NewState,
-    comptime new_states_analyzed: *[]bool,
-    old_states: []const usize,
-) usize {
-    for (new_states.*) |s, idx| {
-        if (std.mem.eql(usize, s.old_states, old_states)) return idx;
-    }
-    var buf: [new_states.len + 1]NewState = ([1]NewState{undefined} ** new_states.len) ++
-        [1]NewState{.{ .old_states = old_states }};
-    std.mem.copy(NewState, &buf, new_states.*);
-    new_states.* = &buf;
+        fn append(comptime self: *@This(), elem: usize) void {
+            if (self.items.len == 0) {
+                self.items = &[1]usize{elem};
+                return;
+            }
 
-    var buf2: [new_states_analyzed.len + 1]bool = ([1]bool{undefined} ** new_states_analyzed.len) ++ [1]bool{false};
-    std.mem.copy(bool, &buf2, new_states_analyzed.*);
-    new_states_analyzed.* = &buf2;
-    return new_states.len - 1;
-}
-
-fn ctSortedAppend(comptime dest: *[]const usize, elem: usize) void {
-    if (dest.len == 0) {
-        dest.* = &[1]usize{elem};
-        return;
-    }
-    var idx = dest.len - 1;
-    while (true) : (idx -= 1) {
-        if (elem == dest.*[idx]) return;
-        if (elem > dest.*[idx]) {
-            dest.* = dest.*[0 .. idx + 1] ++ &[1]usize{elem} ++ dest.*[idx + 1 ..];
-            return;
+            var idx = self.items.len - 1;
+            while (true) : (idx -= 1) {
+                if (elem == self.items[idx]) return;
+                if (elem > self.items[idx]) {
+                    self.items = self.items[0 .. idx + 1] ++ &[1]usize{elem} ++ self.items[idx + 1 ..];
+                    return;
+                }
+                if (idx == 0) break;
+            }
+            self.items = &[1]usize{elem} ++ self.items;
         }
+
+        fn contains(comptime self: @This(), elem: usize) bool {
+            var idx: usize = self.items.len - 1;
+            return while (true) : (idx -= 1) {
+                if (self.items[idx] == elem) break true;
+                if (self.items[idx] < elem) break false;
+                if (idx == 0) break false;
+            };
+        }
+
+        fn eql(comptime lhs: @This(), comptime rhs: @This()) bool {
+            return std.mem.eql(T, lhs.items, rhs.items);
+        }
+    };
+}
+
+// Always iterate with indices
+fn CtArrayList(comptime T: type) type {
+    return struct {
+        items: []T,
+        capacity: usize,
+
+        fn init(comptime s: []const T) @This() {
+            var buf: [s.len]T = undefined;
+            std.mem.copy(T, &buf, s);
+            return .{
+                .items = &buf,
+                .capacity = buf.len,
+            };
+        }
+
+        fn append(comptime self: *@This(), comptime t: T) void {
+            self.ensureCapacity(self.items.len + 1);
+            self.items.len += 1;
+
+            self.items[self.items.len - 1] = t;
+        }
+
+        fn appendSlice(comptime self: *@This(), comptime ts: []const T) void {
+            self.ensureCapacity(self.items.len + ts.len);
+            self.items.len += ts.len;
+            const dst = self.items[self.items.len - ts.len ..];
+            std.mem.copy(T, dst, ts);
+        }
+
+        fn insert(comptime self: *@This(), comptime n: usize, comptime t: T) void {
+            self.ensureCapacity(self.items.len + 1);
+            self.items.len += 1;
+            // @@@
+            std.mem.copyBackwards(T, self.items[n + 1 .. self.items.len], self.items[n .. self.items.len - 1]);
+            self.items[n] = t;
+        }
+
+        fn orderedRemove(comptime self: *@This(), comptime i: usize) void {
+            const new_len = self.items.len - 1;
+            if (new_len == i) {
+                self.items.len -= 1;
+                return;
+            }
+
+            for (self.items[i..new_len]) |*b, j| b.* = self.items[i + 1 + j];
+            self.items[new_len] = undefined;
+            self.items.len = new_len;
+        }
+
+        fn ensureCapacity(comptime self: *@This(), comptime new_capacity: usize) void {
+            if (new_capacity > self.capacity) {
+                self.capacity = std.mem.alignForward(new_capacity, 8);
+                var buf: [self.capacity]T = undefined;
+                std.mem.copy(T, &buf, self.items);
+                self.items = buf[0..self.items.len];
+            }
+        }
+    };
+}
+
+fn newStateIndex(
+    comptime new_states: *[]CtSortedList(usize),
+    comptime old_states: CtSortedList(usize),
+    comptime transitions: *CtArrayList(Transition),
+) usize {
+    for (new_states.*) |old, ns| {
+        if (old.eql(old_states)) return ns;
+    }
+
+    var buf: [new_states.len + 1]CtSortedList(usize) = ([1]CtSortedList(usize){undefined} ** new_states.len) ++ [1]CtSortedList(usize){old_states};
+    std.mem.copy(CtSortedList(usize), &buf, new_states.*);
+    new_states.* = &buf;
+    const new_state = new_states.len - 1;
+
+    var transition_idx: usize = 0;
+    var old_state_idx: usize = 0;
+    while (transition_idx < transitions.items.len and old_state_idx < old_states.items.len) {
+        const transition = transitions.items[transition_idx];
+        const old_state = old_states.items[old_state_idx];
+        if (transition.source > old_state) {
+            old_state_idx += 1;
+            continue;
+        }
+
+        if (transition.source == old_state) {
+            const start = transition_idx;
+            while (transition_idx < transitions.items.len and
+                transitions.items[transition_idx].source == old_state) : (transition_idx += 1)
+            {}
+            const len = transition_idx - start;
+            transitions.appendSlice(transitions.items[start..transition_idx]);
+            for (transitions.items[transitions.items.len - len ..]) |*t| {
+                t.source = new_state;
+            }
+        }
+
+        transition_idx += 1;
+    }
+
+    return new_state;
+}
+
+fn applyAccumulatedOverlap(
+    comptime new_states: *[]CtSortedList(usize),
+    comptime source_state: usize,
+    comptime transitions: *CtArrayList(Transition),
+    comptime overlap: Input,
+    comptime affected_transitions: CtSortedList(usize),
+    comptime current_transition: *usize,
+) void {
+    var old_states = CtSortedList(usize){};
+    var idx: usize = affected_transitions.items.len - 1;
+    while (true) : (idx -= 1) {
+        const affected = &transitions.items[affected_transitions.items[idx]];
+        old_states.append(affected.target);
+
+        if (affected.input.removeOverlap(overlap)) |new_input| {
+            affected.input = new_input;
+        } else {
+            transitions.orderedRemove(idx);
+            if (idx < current_transition.*) {
+                current_transition.* -= 1;
+            }
+        }
+
         if (idx == 0) break;
     }
-    dest.* = &[1]usize{elem} ++ dest.*;
+    const new_state_idx = newStateIndex(new_states, old_states, transitions);
+
+    transitions.insert(current_transition.*, .{
+        .source = source_state,
+        .target = new_state_idx,
+        .input = overlap,
+    });
 }
 
-fn removeOverlapOrRemoveTransition(
-    comptime ts: *[]Transition,
-    comptime idx: usize,
-    comptime t: *Transition,
-    comptime overlap: Input,
-) bool {
-    if (t.input.removeOverlap(overlap)) |new_t|
-        t.input = new_t
-    else {
-        std.mem.copy(Transition, ts.*[idx..], ts.*[idx + 1 ..]);
-        ts.* = ts.*[0 .. ts.len - 1];
-        return true;
-    }
-    return false;
-}
-
-fn ctRemoveTransition(comptime ts: *[]Transition, idx: usize) void {
-    std.mem.copy(Transition, ts.*[idx..], ts.*[idx + 1 ..]);
-    ts.* = ts.*[0 .. ts.len - 1];
-}
-
+// TODO Prune stuff
 // TODO minimize function
-// TODO Thoroughly test this
+// TODO Thoroughly test this as well as the assumption about dead states
+/// If self has had dead states removed, the resulting DFA will have no dead nodes
 pub fn determinize(comptime self: Self) Self {
     if (self.isDfa()) return self;
 
-    comptime var new_states: []NewState = blk: {
-        var buf = [1]NewState{.{ .old_states = &.{0} }};
+    var transitions = CtArrayList(Transition).init(self.transitions);
+    comptime var new_states: []CtSortedList(usize) = blk: {
+        var buf: [self.size()]CtSortedList(usize) = undefined;
+        for (buf) |*ns, i| ns.* = .{
+            .items = &.{i},
+        };
         break :blk &buf;
     };
-    var new_states_analyzed: []bool = blk: {
-        var buf = [1]bool{false};
-        break :blk &buf;
-    };
 
-    var transitions: []const Transition = &.{};
-    while (true) {
-        var all_analyzed = true;
-        // This should pick up new states, no?
-        var state_idx: usize = 0;
-        while (state_idx < new_states.len) : (state_idx += 1) {
-            const s = &new_states[state_idx];
-            if (new_states_analyzed[state_idx]) continue;
-            all_analyzed = false;
-            var state_transitions = self.transitionsFromMulti(s.old_states);
+    var new_state: usize = 0;
+    while (new_state < new_states.len) : (new_state += 1) {
+        // Process transitions
+        process_transitions: while (true) {
+            var accumulated_overlap: ?Input = null;
+            var affected_transitions = CtSortedList(usize){};
+            var processed_any = false;
+            var transition_idx: usize = 0;
+            while (transition_idx < transitions.items.len) : (transition_idx += 1) {
+                var transition = &transitions.items[transition_idx];
+                if (transition.source < new_state) continue;
+                if (transition.source > new_state) break;
 
-            overlap_loop: while (state_transitions.len > 0) {
-                for (state_transitions) |*t1, i| {
-                    var curr_transition = t1.*;
-                    var old_targets: []const usize = &.{t1.target};
-                    for (state_transitions[i + 1 ..]) |*t2, j| {
-                        if (curr_transition.input.overlap(t2.input)) |overlap| {
-                            // Order is important because we are possibly removing from `state_transitions`
-                            const b2 = removeOverlapOrRemoveTransition(&state_transitions, i + 1 + j, t2, overlap);
-                            const b1 = removeOverlapOrRemoveTransition(&state_transitions, i, t1, overlap);
-                            ctSortedAppend(&old_targets, t2.target);
-                            // Make overlap a transition
-                            curr_transition = Transition{
-                                .source = state_idx,
-                                .target = newState(&new_states, &new_states_analyzed, old_targets),
-                                .input = overlap,
-                            };
+                if (accumulated_overlap) |old_overlap| {
+                    if (old_overlap.overlap(transition.input)) |new_overlap| {
+                        accumulated_overlap = new_overlap;
+                        affected_transitions.append(transition_idx);
+                    } else if (affected_transitions.items.len > 1) {
+                        // It's the end of this set of overlaps
+                        applyAccumulatedOverlap(
+                            &new_states,
+                            new_state,
+                            &transitions,
+                            old_overlap,
+                            affected_transitions,
+                            &transition_idx,
+                        );
+                        processed_any = true;
 
-                            if (b1 or b2) {
-                                // Stop here by breaking, we will get to overlap_loop
-                                break;
-                            }
-                        }
+                        accumulated_overlap = null;
+                        affected_transitions.items.len = 0;
                     }
-
-                    if (old_targets.len > 1) {
-                        // We had overlap
-                        transitions = transitions ++ &[1]Transition{curr_transition};
-                    } else {
-                        // No overlap
-                        transitions = transitions ++ &[1]Transition{.{
-                            .source = state_idx,
-                            .target = newState(&new_states, &new_states_analyzed, old_targets),
-                            .input = t1.input,
-                        }};
-                        ctRemoveTransition(&state_transitions, i);
-                    }
-                    continue :overlap_loop;
+                } else {
+                    accumulated_overlap = transition.input;
+                    affected_transitions.append(transition_idx);
                 }
-                break :overlap_loop;
             }
-            new_states_analyzed[state_idx] = true;
-        }
+            // If we have actual accumulated_overlap, commit it before next loop
+            if (affected_transitions.items.len > 1) {
+                applyAccumulatedOverlap(
+                    &new_states,
+                    new_state,
+                    &transitions,
+                    accumulated_overlap.?,
+                    affected_transitions,
+                    &transition_idx,
+                );
+                processed_any = true;
+            }
 
-        if (all_analyzed)
-            break;
+            if (!processed_any) break :process_transitions;
+        }
     }
 
-    var final_states: []const usize = &.{};
+    var final_states = CtSortedList(usize){};
     for (self.final_states) |old_fs| {
-        for (new_states) |s, idx| {
-            for (s.old_states) |o| if (old_fs == o) {
-                ctSortedAppend(&final_states, idx);
-            };
+        for (new_states) |old_states, ns| {
+            if (old_states.contains(old_fs))
+                final_states.append(ns);
         }
     }
-    // Make sure transitions are sorted
-    // TODO Is this actually guaranteed?
-    //   I think so but prove it
-    std.debug.assert(std.sort.isSorted(Transition, transitions, {}, transitionLessThan));
+
+    // TODO Prove that output will have sorted transitions and no dead nodes
 
     return .{
-        .final_states = final_states,
-        .transitions = transitions,
+        .final_states = final_states.items,
+        .transitions = transitions.items,
     };
 }

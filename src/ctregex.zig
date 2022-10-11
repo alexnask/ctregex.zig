@@ -474,12 +474,12 @@ pub fn match(
 //   is as expected
 
 test "DFA match" {
+    @setEvalBranchQuota(2_500);
+    try std.testing.expect(try match(.{}, "ab(def)*é|aghi", "abdefé"));
     comptime {
-        @setEvalBranchQuota(1370);
         try std.testing.expect(try match(.{}, "ab(def)*é|aghi", "abdefé"));
     }
 
-    try std.testing.expect(try match(.{}, "ab(def)*é|aghi", "abdefé"));
     // TODO Take a look at output assembly, compare in various modes
 }
 // TODO Reorganize files

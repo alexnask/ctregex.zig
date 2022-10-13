@@ -438,6 +438,7 @@ pub fn MatchResult(
     std.debug.todo("NFA engine, determine when to use NFA in .auto");
 }
 
+// TODO: Check that everything caches as wexpected at ast and automaton boundary
 pub fn match(
     comptime options: MatchOptions,
     comptime pattern: [:0]const u8,
@@ -445,7 +446,7 @@ pub fn match(
 ) MatchResult(options, pattern, @TypeOf(input)) {
     const Char = options.encoding.CharT();
     const ast = comptime LL.parse(PcreGrammar, pattern);
-    // TODO: minimize (also check C++ to see order of calls)
+    // TODO: minimize
     const automaton = comptime astToAutomaton(ast).determinize();
 
     // TODO: NFA engine
@@ -474,14 +475,21 @@ pub fn match(
 //   is as expected
 
 test "DFA match" {
-    @setEvalBranchQuota(2_500);
-    try std.testing.expect(try match(.{}, "ab(def)*é|aghi", "abdefé"));
+    // comptime literal, rt literal -> 2_872
+    // comptime fbs, rt fbs -> 2_983
+    // comptime literal, rt fixedBufferStream -> 2_872
+    // comptime fbs, rt literal -> 2_983
+    @setEvalBranchQuota(2_983);
     comptime {
-        try std.testing.expect(try match(.{}, "ab(def)*é|aghi", "abdefé"));
+        var fbs = std.io.fixedBufferStream("abdefé");
+        std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", fbs.reader()));
+        //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
     }
+    try std.testing.expect(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
 
     // TODO Take a look at output assembly, compare in various modes
+    // TODO Test dfaMatchSlice vs dfaMatchReader + fixedBufferStream.reader of encoded buffer for all encodings
+    // for ascii and utf8 this is particularly interesting, they should be equivalent in theory
 }
-// TODO Reorganize files
-// TODO Test dfaMatchSlice vs dfaMatchReader + fixedBufferStream.reader of encoded buffer for all encodings
-// for ascii and utf8 this is particularly interesting, they should be equivalent in theory
+// TODO Reorganize files, only keep public interface in this file
+//   Flesh out structure of things, add `std.debug.todo`s

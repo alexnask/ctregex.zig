@@ -721,11 +721,11 @@ fn CtArrayList(comptime T: type) type {
 
         fn initCapacity(comptime capacity: usize) @This() {
             var self = @This(){ .items = &.{}, .capacity = 0 };
-            self.ensureCapacity(capacity);
+            self.ensureTotalCapacity(capacity);
             return self;
         }
 
-        fn initFromSlice(comptime s: []const T) @This() {
+        fn fromSlice(comptime s: []const T) @This() {
             var buf: [s.len]T = undefined;
             std.mem.copy(T, &buf, s);
             return .{
@@ -735,21 +735,21 @@ fn CtArrayList(comptime T: type) type {
         }
 
         fn append(comptime self: *@This(), comptime t: T) void {
-            self.ensureCapacity(self.items.len + 1);
+            self.ensureTotalCapacity(self.items.len + 1);
             self.items.len += 1;
 
             self.items[self.items.len - 1] = t;
         }
 
         fn appendSlice(comptime self: *@This(), comptime ts: []const T) void {
-            self.ensureCapacity(self.items.len + ts.len);
+            self.ensureTotalCapacity(self.items.len + ts.len);
             self.items.len += ts.len;
             const dst = self.items[self.items.len - ts.len ..];
             std.mem.copy(T, dst, ts);
         }
 
         fn insert(comptime self: *@This(), comptime n: usize, comptime t: T) void {
-            self.ensureCapacity(self.items.len + 1);
+            self.ensureTotalCapacity(self.items.len + 1);
             self.items.len += 1;
             std.mem.copyBackwards(T, self.items[n + 1 .. self.items.len], self.items[n .. self.items.len - 1]);
             self.items[n] = t;
@@ -767,13 +767,14 @@ fn CtArrayList(comptime T: type) type {
             self.items.len = new_len;
         }
 
-        fn ensureCapacity(comptime self: *@This(), comptime new_capacity: usize) void {
-            if (new_capacity > self.capacity) {
-                self.capacity = std.mem.alignForward(new_capacity, 8);
-                var buf: [self.capacity]T = undefined;
-                std.mem.copy(T, &buf, self.items);
-                self.items = buf[0..self.items.len];
-            }
+        fn ensureTotalCapacity(comptime self: *@This(), comptime new_capacity: usize) void {
+            if (self.capacity >= new_capacity) return;
+            const better_capacity = std.math.ceilPowerOfTwo(usize, new_capacity) catch unreachable;
+
+            self.capacity = better_capacity;
+            var buf: [self.capacity]T = undefined;
+            std.mem.copy(T, &buf, self.items);
+            self.items = buf[0..self.items.len];
         }
     };
 }
@@ -800,15 +801,54 @@ const SortedList = CtSortedList(usize);
 // TODO minimize function
 // TODO: Split into more files
 // TODO Thoroughly test this as well as the assumption about dead states
+
+const TransitionSlice = struct {
+    start: usize,
+    len: usize,
+};
+
+// TODO: Check this
+/// Returns number of copied transitions
+fn appendFromSources(
+    comptime transitions: *CtArrayList(Transition),
+    comptime sources: SortedList,
+) usize {
+    var inserted: usize = 0;
+
+    const max_source = sources.items[sources.items.len - 1];
+
+    var curr_source_idx: usize = 0;
+    for (transitions.items) |t, t_idx| {
+        const curr_source = sources.items[curr_source_idx];
+
+        if (t.source == curr_source) {
+            const start_idx = t_idx;
+            var curr = t_idx + 1;
+            while (curr < transitions.items.len and
+                transitions.items[curr].source == curr_source) : (curr += 1)
+            {}
+
+            const len = curr - start_idx;
+            if (len == 1) {
+                transitions.append(t);
+            } else {
+                transitions.appendSlice(transitions.items[start_idx..curr]);
+            }
+            inserted += len;
+            curr_source_idx += 1;
+        } else if (t.source > curr_source) {
+            curr_source_idx += 1;
+        }
+
+        if (curr_source_idx >= sources.items.len or t.source > max_source) break;
+    }
+    return inserted;
+}
+
 pub fn determinize(comptime self: Self) Self {
     if (self.isDfa()) return self;
 
     const old_state_max = self.size() - 1;
-
-    // TODO: Do everything in place in old_transitions?
-    var old_transitions = CtArrayList(Transition).initFromSlice(self.transitions);
-    var new_transitions = CtArrayList(Transition).initCapacity(16);
-
     comptime var new_states: []SortedList = blk: {
         var buf: [old_state_max + 1]SortedList = undefined;
         for (buf) |*ns, i| ns.* = .{
@@ -817,95 +857,117 @@ pub fn determinize(comptime self: Self) Self {
         break :blk &buf;
     };
 
-    // TODO: Do this in place in old_transitions, no new_transitions
-    //   For new states, first copy from old transitions then reduce again
-    //   currently new states don't reduce at all
+    // The procedure to determinize `self` is the following:
+    //   Keep a new_state -> {old_states} map
+    //    Initialize it with old_state -> {old_state}
+    //  For each new_state:
+    //    If an old_state, find slice of transitions in `transitions`
+    //    If a new_state, insert transitions from each old state, find resulting slice
+    //      This slice is now named `transition_slice`
+    //      If transition_slice.len < 2, continue
+    //      Start with base transition = transition_slice[-1]
+    //      We will iteratively do the following as long as we have a base transition and at least one more transition:
+    //         Find overlap between base transition and every transition in `transition_slice`,
+    //         modifying inputs and possibly removing transitions that have overlap as we go.
+    //         If we found some overlap, look up the new_state made from the old_states of the overlapping transitions,
+    //           and append a new transition to `transitions`, then modify or remove the base transition
+    //         Fix base index
+    //  At the end, we have our new transitions and the automaton is deterministic
+    //    TODO: However, there may be unreachable states amoung the old states, we need to remove them
+    //    TODO: Remove unreachable states in minimize, but don't even check for dead states?
+    //    TODO: Is this the only thing that could happen? Maybe unreachable states among new_states and dead states?
 
-    // Go through all states
-    // Go backwards to reduce the amount of moves when removing transitions
+    var transitions = CtArrayList(Transition).fromSlice(self.transitions);
+    var prev_end_idx: usize = 0;
     var state: usize = 0;
-    while (state <= old_state_max) : (state += 1) {
-        var transition_slice: struct {
-            start: usize,
-            len: usize,
-        } = blk: {
-            // TODO: Go the other way?
-            var idx: usize = old_transitions.items.len - 1;
-            while (true) : (idx -= 1) {
-                if (old_transitions.items[idx].source < state) break;
-                if (old_transitions.items[idx].source == state) {
-                    const end = idx + 1;
-                    const start = while (old_transitions.items[idx].source == state) : (idx -= 1) {
-                        if (idx == 0) break 0;
-                    } else idx + 1;
-                    break :blk .{ .start = start, .len = end - start };
-                }
+    // Transitions will always be sorted, even while we are modifying them
+    while (state < new_states.len) : (state += 1) {
+        var transition_slice: TransitionSlice = if (state <= old_state_max) blk: {
+            if (prev_end_idx >= transitions.items.len) continue;
+            if (transitions.items[prev_end_idx].source != state) continue;
 
-                if (idx == 0) break;
-            }
-            break :blk .{ .start = undefined, .len = 0 };
+            // Old state, just find the transition slice
+            var idx: usize = prev_end_idx + 1;
+            while (idx < transitions.items.len and
+                transitions.items[idx].source == state) : (idx += 1)
+            {}
+            break :blk .{ .start = prev_end_idx, .len = idx - prev_end_idx };
+        } else blk: {
+            // New state, construct the transition slice by inserting at `prev_end_idx + 1`
+            // We copy here and not when creating the new transition to get the already reduced transitions
+            //   from previous states
+            const start_source_fix = prev_end_idx;
+            const inserted = appendFromSources(
+                &transitions,
+                new_states[state],
+            );
+            // Fix transition sources
+            for (transitions.items[start_source_fix..][0..inserted]) |*t|
+                t.source = state;
+            break :blk .{ .start = prev_end_idx, .len = inserted };
         };
-        if (transition_slice.len == 0) continue;
+        defer prev_end_idx = transition_slice.start + transition_slice.len;
 
+        // We cannot reduce from a single item
+        if (transition_slice.len < 2) continue;
+
+        // Reduce loop
+        // Set our first base transition idx
         var base_transition_idx = transition_slice.start + transition_slice.len - 1;
         while (base_transition_idx > transition_slice.start) {
-            const base_transition = old_transitions.items[base_transition_idx];
-
+            const base_transition = transitions.items[base_transition_idx];
+            // Set up overlap state
             var accumulated_overlap = base_transition.input;
             var old_targets = SortedList{ .items = &.{base_transition.target} };
 
-            // Resolve one overlap
+            // Find the maximum overlap between the base transition and the others
             var transition_idx = base_transition_idx - 1;
             while (true) : (transition_idx -= 1) {
-                const curr_transition = &old_transitions.items[transition_idx];
+                const curr_transition = &transitions.items[transition_idx];
 
                 if (accumulated_overlap.overlap(curr_transition.input)) |overlap| blk: {
+                    // Update overlap state
                     accumulated_overlap = overlap;
                     old_targets.append(curr_transition.target);
-
+                    // Remove overlap from curr_transition or remove curr_transition
                     curr_transition.input = curr_transition.input.removeOverlap(overlap) orelse {
                         // We don't need to manipulate transition_idx because we are looping backwards
-                        old_transitions.orderedRemove(transition_idx);
+                        transitions.orderedRemove(transition_idx);
                         transition_slice.len -= 1;
-                        // We removed a transition with an index less than the base transition,
-                        //   move base transition up
+                        // We removed a transition with an index less than the base transitions,
+                        //   move base transition index up to match this
                         base_transition_idx -= 1;
                         break :blk;
                     };
                 }
 
-                if (transition_idx <= transition_slice.start) break;
+                if (transition_idx == transition_slice.start) break;
             }
 
-            // We had some overlap
+            // Check if we accumulated any overlap
             if (old_targets.items.len > 1) {
-                // Add our new transition to a combined state
-                new_transitions.append(.{
+                // If we did, add our new transition to a combined state in our current transition_slice
+                transitions.insert(transition_slice.start + transition_slice.len, .{
                     .source = state,
                     .target = newStateIndex(&new_states, old_targets),
                     .input = accumulated_overlap,
                 });
+                transition_slice.len += 1;
 
-                // Clean up base transition
-                old_transitions.items[base_transition_idx] = base_transition.input.removeOverlap(
+                // Resolve base transition
+                transitions.items[base_transition_idx] = base_transition.input.removeOverlap(
                     accumulated_overlap,
                 ) orelse {
-                    // We removed the base tradition, our new base is at the same index
-                    old_transitions.orderedRemove(base_transition_idx);
+                    // We removed the base transition, our new base is at the same index
+                    transitions.orderedRemove(base_transition_idx);
                     transition_slice.len -= 1;
                     continue;
                 };
-                // We didn't remove the base transition, go to next base
-                base_transition_idx -= 1;
-            } else {
+                // We didn't remove the base transition, move index up
                 base_transition_idx -= 1;
             }
+            base_transition_idx -= 1;
         }
-
-        // Copy remaining transitions in result automaton transitions
-        // These are guaranteed not to overlap
-        if (transition_slice.len != 0)
-            new_transitions.appendSlice(old_transitions.items[transition_slice.start..][0..transition_slice.len]);
     }
 
     var final_states = SortedList{};
@@ -916,29 +978,9 @@ pub fn determinize(comptime self: Self) Self {
         }
     }
 
-    // Add transitions for new states
-    // These are used for transitionsFrom
-    const temp_self = Self{
-        .transitions = new_transitions.items,
-        .final_states = final_states.items,
-    };
-
-    // TODO: Prove that this is correct (no unreachable nodes, sorting preserve)
-    //   New states could potentially be dead, look for example
-    // For new states, copy over remaining transitions from corresponding old states
-    for (new_states[old_state_max + 1 ..]) |old_states, off| {
-        const new_state = off + old_state_max + 1;
-
-        const start_source_fix = new_transitions.items.len;
-        for (old_states.items) |old_state| {
-            new_transitions.appendSlice(temp_self.transitionsFrom(old_state));
-        }
-        for (new_transitions.items[start_source_fix..]) |*t| t.source = new_state;
-    }
-
     return .{
         .final_states = final_states.items,
-        .transitions = new_transitions.items,
+        .transitions = transitions.items,
     };
 }
 

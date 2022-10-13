@@ -148,25 +148,60 @@ pub const Transition = struct {
 final_states: []const usize,
 transitions: []const Transition,
 
+// TODO New names
+//   Unreachable state: Cannot be reached from the start state through any set of transitions
+//   Dead state: Cannot reach any final state through any set of transitions
+// Document guarantees about dead and unreachable nodes for every function, remove them when necessary in here
+
+fn startReachableAndTransitions(comptime self: Self) std.meta.Tuple(&.{ bool, []const Transition }) {
+    var start_transitions: []const Transition = undefined;
+    start_transitions.ptr = self.transitions.ptr;
+    start_transitions.len = 0;
+
+    var start_reachable = false;
+    for (self.transitions) |t| {
+        if (t.source == 0) {
+            start_transitions.len += 1;
+        } else if (start_reachable) break;
+        if (t.target == 0) start_reachable = true;
+    }
+
+    return .{ start_reachable, start_transitions };
+}
+
+// TODO: This should work and create no dead or unreachable nodes, prove
 pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
+    const rhs_start_reachable_transitions = rhs.startReachableAndTransitions();
+    const rhs_start_reachable = rhs_start_reachable_transitions[0];
+    const rhs_start_transitions = rhs_start_reachable_transitions[1];
+
     // Offset to be added to states from rhs
-    const rhs_offset = lhs.size();
+    const rhs_offset = lhs.size() - if (rhs_start_reachable) 0 else 1;
+
+    // Works because final_states are not empty and are sorted
+    const rhs_start_final = rhs.final_states[0] == 0;
+    const remove_final_state = rhs_start_final and !rhs_start_reachable;
 
     // For every final state of lhs, we copy the transitions from rhs' start state
     // Also, if rhs' start state is also final we keep lhs' final states final instead of removing them
-    const rhs_start_final = rhs.isFinal(0);
-    var final_states: [rhs.final_states.len + if (rhs_start_final) lhs.final_states.len else 0]usize = undefined;
+    // If the rhs start state is not reachable, we remove it
+    const rhs_final_state_offset = @boolToInt(remove_final_state);
+    var final_states: [
+        rhs.final_states.len - rhs_final_state_offset +
+            if (rhs_start_final) lhs.final_states.len else 0
+    ]usize = undefined;
     if (rhs_start_final) {
         // If both lhs and rhs final states are sorted, the result will be sorted
         std.mem.copy(usize, &final_states, lhs.final_states);
-        for (final_states[lhs.final_states.len..][0..rhs.final_states.len]) |*s, idx|
-            s.* = rhs.final_states[idx] + rhs_offset;
-    } else for (final_states[0..rhs.final_states.len]) |*s, idx|
-        s.* = rhs.final_states[idx] + rhs_offset;
+        for (final_states[lhs.final_states.len..][0 .. rhs.final_states.len - rhs_final_state_offset]) |*s, idx|
+            s.* = rhs.final_states[idx + rhs_final_state_offset] + rhs_offset;
+    } else for (final_states[0 .. rhs.final_states.len - rhs_final_state_offset]) |*s, idx|
+        s.* = rhs.final_states[idx + rhs_final_state_offset] + rhs_offset;
 
-    const rhs_start_transitions = rhs.transitionsFrom(0);
+    // If the rhs start state is not reachable, we remove its transitions from the rhs portion
     const new_transition_count = lhs.final_states.len * rhs_start_transitions.len;
-    var transitions: [lhs.transitions.len + rhs.transitions.len + new_transition_count]Transition = undefined;
+    const copy_from_rhs_count = if (rhs_start_reachable) rhs.transitions.len else rhs.transitions.len - rhs_start_transitions.len;
+    var transitions: [lhs.transitions.len + copy_from_rhs_count + new_transition_count]Transition = undefined;
     std.mem.copy(Transition, &transitions, lhs.transitions);
 
     var transition_idx = lhs.transitions.len;
@@ -181,6 +216,8 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
         }
     }
 
+    // TODO: Interleaf copies from original, then when in final state copy the new ones, then till next final state etc.
+    //   This way we can avoid sorting here
     std.sort.sort(
         Transition,
         transitions[0..transition_idx],
@@ -188,11 +225,12 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
         transitionLessThan,
     );
 
-    for (transitions[transition_idx..]) |*t, idx| t.* = .{
-        .source = rhs.transitions[idx].source + rhs_offset,
-        .target = rhs.transitions[idx].target + rhs_offset,
-        .input = rhs.transitions[idx].input,
-    };
+    const rhs_transition_offset = if (rhs_start_reachable) 0 else rhs_start_transitions.len;
+    for (transitions[transition_idx..]) |*t, idx| {
+        t.* = rhs.transitions[idx + rhs_transition_offset];
+        t.source += rhs_offset;
+        t.target += rhs_offset;
+    }
 
     return .{
         .final_states = &final_states,
@@ -200,14 +238,29 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
     };
 }
 
+// TODO: This should work and create no dead or unreachable nodes, prove
 pub fn alt(comptime lhs: Self, comptime rhs: Self) Self {
+    const lhs_start_reachable_transitions = lhs.startReachableAndTransitions();
+    const lhs_start_reachable = lhs_start_reachable_transitions[0];
+    const lhs_start_transitions = lhs_start_reachable_transitions[1];
+    const lhs_start_final = lhs.final_states[0] == 0;
+    const lhs_remove_final_state = lhs_start_final and !lhs_start_reachable;
+
+    const rhs_start_reachable_transitions = rhs.startReachableAndTransitions();
+    const rhs_start_reachable = rhs_start_reachable_transitions[0];
+    const rhs_start_transitions = rhs_start_reachable_transitions[1];
+    const rhs_start_final = rhs.final_states[0] == 0;
+    const rhs_remove_final_state = rhs_start_final and !rhs_start_reachable;
+
     // Offset to be added to states from rhs, we need 1 extra for the initial state we insert
-    const rhs_offset = lhs.size() + 1;
+    const lhs_offset = if (lhs_start_reachable) 1 else 0;
+    const rhs_offset = lhs.size() + lhs_offset - if (rhs_start_reachable) 0 else 1;
 
     // If at least one of the start states is final, our new start state also needs to be
-    const new_state_final = lhs.isFinal(0) or rhs.isFinal(0);
+    const new_state_final = lhs_start_final or rhs_start_final;
+    const removed_final_states = @boolToInt(lhs_remove_final_state) + @boolToInt(rhs_remove_final_state);
     var final_states: [
-        lhs.final_states.len + rhs.final_states.len +
+        lhs.final_states.len + rhs.final_states.len - removed_final_states +
             @boolToInt(new_state_final)
     ]usize = undefined;
 
@@ -217,20 +270,23 @@ pub fn alt(comptime lhs: Self, comptime rhs: Self) Self {
             offset = 1;
             final_states[0] = 0;
         }
-        for (final_states[offset..lhs.final_states.len]) |*s, idx| s.* = lhs.final_states[idx] + 1;
-        for (final_states[offset..][lhs.final_states.len..]) |*s, idx| s.* = rhs.final_states[idx] + rhs_offset;
+        for (final_states[offset..lhs.final_states.len]) |*s, idx|
+            s.* = lhs.final_states[idx + @boolToInt(lhs_remove_final_state)] + lhs_offset;
+        for (final_states[offset..][lhs.final_states.len..]) |*s, idx|
+            s.* = rhs.final_states[idx + @boolToInt(rhs_remove_final_state)] + rhs_offset;
     }
 
     // We don't need to sort any section of transitions, we insert transitions from our new start state to lhs states
     //  then to rhs states, then all the lhs transitions and finally the rhs transitions
-    const lhs_start_transitions = lhs.transitionsFrom(0);
-    const rhs_start_transitions = rhs.transitionsFrom(0);
     const new_transition_count = lhs_start_transitions.len + rhs_start_transitions.len;
-    var transitions: [lhs.transitions.len + rhs.transitions.len + new_transition_count]Transition = undefined;
+
+    const copy_from_rhs_count = if (rhs_start_reachable) rhs.transitions.len else rhs.transitions.len - rhs_start_transitions.len;
+    const copy_from_lhs_count = if (lhs_start_reachable) lhs.transitions.len else lhs.transitions.len - lhs_start_transitions.len;
+    var transitions: [copy_from_lhs_count + copy_from_rhs_count + new_transition_count]Transition = undefined;
     for (lhs_start_transitions) |t, idx| {
         transitions[idx] = .{
             .source = 0,
-            .target = t.target + 1,
+            .target = t.target + lhs_offset,
             .input = t.input,
         };
     }
@@ -242,17 +298,21 @@ pub fn alt(comptime lhs: Self, comptime rhs: Self) Self {
         };
     }
 
+    const lhs_transition_offset = if (lhs_start_reachable) 0 else lhs_start_transitions.len;
+    const rhs_transition_offset = if (rhs_start_reachable) 0 else rhs_start_transitions.len;
+
     const old_transition_section = lhs_start_transitions.len + rhs_start_transitions.len;
-    for (transitions[old_transition_section..][0..lhs.transitions.len]) |*t, idx| t.* = .{
-        .source = lhs.transitions[idx].source + 1,
-        .target = lhs.transitions[idx].target + 1,
-        .input = lhs.transitions[idx].input,
-    };
-    for (transitions[old_transition_section + lhs.transitions.len ..]) |*t, idx| t.* = .{
-        .source = rhs.transitions[idx].source + rhs_offset,
-        .target = rhs.transitions[idx].target + rhs_offset,
-        .input = rhs.transitions[idx].input,
-    };
+    for (transitions[old_transition_section..][0..copy_from_lhs_count]) |*t, idx| {
+        t.* = lhs.transitions[idx + lhs_transition_offset];
+        t.source += lhs_offset;
+        t.target += lhs_offset;
+    }
+
+    for (transitions[old_transition_section + copy_from_lhs_count ..]) |*t, idx| {
+        t.* = rhs.transitions[idx + rhs_transition_offset];
+        t.source += rhs_offset;
+        t.target += rhs_offset;
+    }
 
     return .{
         .final_states = &final_states,
@@ -277,24 +337,38 @@ pub fn single(comptime c: u21) Self {
 }
 
 pub fn opt(comptime self: Self) Self {
-    var final_states: [self.final_states.len + 1]usize = undefined;
-    final_states[0] = 0;
-    for (final_states[1..]) |*s, idx| s.* = self.final_states[idx] + 1;
+    const start_reachable_transitions = self.startReachableAndTransitions();
+    const start_reachable = start_reachable_transitions[0];
+    const start_transitions = start_reachable_transitions[1];
+    const start_final = self.final_states[0] == 0;
+    const remove_final_state = start_final and !start_reachable;
 
-    const start_transitions = self.transitionsFrom(0);
-    var transitions: [self.transitions.len + start_transitions.len]Transition = undefined;
+    // State offset
+    const offset = if (start_reachable) 1 else 0;
+
+    const final_states_offset = @boolToInt(remove_final_state);
+    var final_states: [self.final_states.len + @boolToInt(!remove_final_state)]usize = undefined;
+    final_states[0] = 0;
+    for (final_states[1..]) |*s, idx| s.* = self.final_states[idx + final_states_offset] + offset;
+
+    const copy_from_self_count = if (start_reachable)
+        self.transitions.len
+    else
+        self.transitions.len - start_transitions.len;
+
+    var transitions: [copy_from_self_count + start_transitions.len]Transition = undefined;
     for (transitions[0..start_transitions.len]) |*t, idx| {
-        t.* = .{
-            .source = 0,
-            .target = start_transitions[idx].target + 1,
-            .input = start_transitions[idx].input,
-        };
+        t.* = start_transitions[idx];
+        t.source = 0;
+        t.target += offset;
     }
-    for (transitions[start_transitions.len..]) |*t, idx| t.* = .{
-        .source = self.transitions[idx].source + 1,
-        .target = self.transitions[idx].target + 1,
-        .input = self.transitions[idx].input,
-    };
+
+    const self_transition_offset = if (start_reachable) 0 else start_transitions.len;
+    for (transitions[start_transitions.len..]) |*t, idx| {
+        t.* = self.transitions[idx + self_transition_offset];
+        t.source += offset;
+        t.target += offset;
+    }
 
     return .{
         .final_states = &final_states,
@@ -303,43 +377,64 @@ pub fn opt(comptime self: Self) Self {
 }
 
 fn starOrPlus(comptime self: Self, comptime kind: enum { star, plus }) Self {
-    const offset = switch (kind) {
-        .star => 1,
-        .plus => 0,
+    const start_reachable_transitions = self.startReachableAndTransitions();
+    const start_reachable = start_reachable_transitions[0];
+    const start_transitions = start_reachable_transitions[1];
+    const start_final = self.final_states[0] == 0;
+    const remove_final_state = start_final and !start_reachable;
+
+    // State offset
+    const offset = if (start_reachable) 1 else 0;
+
+    const new_state_final = switch (kind) {
+        .star => true,
+        .plus => false,
     };
-    // Almost exactly the same as opt, but with additional cloning of starting transitions to the final states
-    var final_states: [self.final_states.len + offset]usize = undefined;
-    if (offset != 0) {
+
+    const final_states_offset = @boolToInt(remove_final_state);
+    var final_states: [self.final_states.len - final_states_offset + @boolToInt(new_state_final)]usize = undefined;
+    if (new_state_final) {
         final_states[0] = 0;
     }
-    for (final_states[offset..]) |*s, idx| s.* = self.final_states[idx] + 1;
+    for (final_states[@boolToInt(new_state_final)..]) |*s, idx| s.* = self.final_states[idx + final_states_offset] + offset;
 
-    const start_transitions = self.transitionsFrom(0);
     const new_transition_count = start_transitions.len * (self.final_states.len + 1);
-    var transitions: [self.transitions.len + new_transition_count]Transition = undefined;
-    for (transitions[0..start_transitions.len]) |*t, idx| t.* = .{
-        .source = 0,
-        .target = start_transitions[idx].target + 1,
-        .input = start_transitions[idx].input,
-    };
-    for (transitions[start_transitions.len..][0..self.transitions.len]) |*t, idx| t.* = .{
-        .source = self.transitions[idx].source + 1,
-        .target = self.transitions[idx].target + 1,
-        .input = self.transitions[idx].input,
-    };
+    const copy_from_self_count = if (start_reachable)
+        self.transitions.len
+    else
+        self.transitions.len - start_transitions.len;
 
-    var transition_idx = start_transitions.len + self.transitions.len;
-    for (final_states[offset..]) |s| {
+    var transitions: [copy_from_self_count + new_transition_count]Transition = undefined;
+    // Transitions from new start state
+    for (transitions[0..start_transitions.len]) |*t, idx| {
+        t.* = start_transitions[idx];
+        t.source = 0;
+        t.target += offset;
+    }
+
+    // Rest of old transitions, minus the ones from start if we removed them
+    const self_transition_offset = if (start_reachable) 0 else start_transitions.len;
+    for (transitions[start_transitions.len..][0..copy_from_self_count]) |*t, idx| {
+        t.* = self.transitions[idx + self_transition_offset];
+        t.source += offset;
+        t.target += offset;
+    }
+
+    var transition_idx = start_transitions.len + copy_from_self_count;
+    // For each new final state (except state 0 if it is final, which has been handled already)
+    //   copy the old start transitions with fixed source and targets
+    for (final_states[@boolToInt(new_state_final)..]) |s| {
         for (start_transitions) |t| {
             transitions[transition_idx] = .{
                 .source = s,
-                .target = t.target + 1,
+                .target = t.target + offset,
                 .input = t.input,
             };
             transition_idx += 1;
         }
     }
-    std.debug.assert(transition_idx == transitions.len);
+
+    // TODO: Rewrite in a way we don't need to sort, should be very similar to concat()
     std.sort.sort(
         Transition,
         transitions[start_transitions.len + self.transitions.len ..],
@@ -415,95 +510,6 @@ pub fn singleCharBoundInEncoding(comptime self: Self, comptime encoding: Encodin
     };
 }
 
-fn leadsToFinal(
-    comptime self: Self,
-    comptime state: usize,
-    comptime visited: []const usize,
-) bool {
-    if (self.isFinal(state)) return true;
-    const state_visited = for (visited) |v| {
-        if (v == state) break true;
-    } else false;
-    // We hit a cycle
-    if (state_visited) return false;
-
-    for (self.transitionsFrom(state)) |t| {
-        if (self.isFinal(t.target)) return true;
-        if (t.source == t.target) continue;
-        if (self.leadsToFinal(t.target, visited ++ &[1]usize{state})) return true;
-    }
-    return false;
-}
-
-pub fn removeDeadStates(comptime self: Self) Self {
-    // We find all states reachable from transitions from the start state,
-    //   and mark them as reachable if they lead to a final state.
-    var state_reachable: []bool = b: {
-        var res = [1]bool{true};
-        break :b &res;
-    };
-    var max_state: usize = 0;
-    for (self.transitions) |t| {
-        if (t.target > max_state) max_state = t.target;
-        if (t.source > max_state) max_state = t.source;
-
-        // Allocate to max_state if necessary, guarantee we are in bounds later
-        if (state_reachable.len <= max_state)
-            state_reachable = b: {
-                var new_arr = [1]bool{false} ** (max_state + 1);
-                std.mem.copy(bool, &new_arr, state_reachable);
-                break :b &new_arr;
-            };
-
-        // We also filter out states which do not lead to any final state through any transition
-        if (state_reachable[t.source] and self.leadsToFinal(t.target, &.{t.source})) {
-            state_reachable[t.target] = true;
-        }
-    }
-
-    // Map from current states to new states
-    const new_state = block: {
-        var res: [max_state + 1]usize = undefined;
-        var already_removed = 0;
-        for (res) |*new, old| {
-            if (!state_reachable[old])
-                already_removed += 1;
-            new.* = old - already_removed;
-        }
-        break :block res;
-    };
-
-    // Filter final states
-    var final_states: [self.final_states.len]usize = undefined;
-    var final_states_idx = 0;
-    for (self.final_states) |s| {
-        if (state_reachable[s]) {
-            final_states[final_states_idx] = new_state[s];
-            final_states_idx += 1;
-        }
-    }
-
-    // Filter transitions and fix states
-    var transitions: [self.transitions.len]Transition = undefined;
-    var transitions_idx = 0;
-    for (self.transitions) |t| {
-        if (!state_reachable[t.source] or !state_reachable[t.target])
-            continue;
-
-        transitions[transitions_idx] = .{
-            .source = new_state[t.source],
-            .target = new_state[t.target],
-            .input = t.input,
-        };
-        transitions_idx += 1;
-    }
-
-    return .{
-        .final_states = final_states[0..final_states_idx],
-        .transitions = transitions[0..transitions_idx],
-    };
-}
-
 pub fn isDfa(comptime self: Self) bool {
     var start: usize = 0;
     var state = 0;
@@ -524,15 +530,6 @@ pub fn isDfa(comptime self: Self) bool {
     return true;
 }
 
-fn isFinal(comptime self: Self, comptime state: usize) bool {
-    // Assume this is sorted
-    for (self.final_states) |s| {
-        if (s > state) return false;
-        if (s == state) return true;
-    }
-    return false;
-}
-
 pub fn size(comptime self: Self) usize {
     var max: usize = 0;
     for (self.transitions) |t| {
@@ -540,30 +537,6 @@ pub fn size(comptime self: Self) usize {
         if (t.source > max) max = t.source;
     }
     return max + 1;
-}
-
-/// Assumes `sources` is sorted
-fn transitionsFromMulti(comptime self: Self, comptime sources: []const usize) []Transition {
-    var res: []Transition = &.{};
-    var idx: usize = 0;
-    var source_idx: usize = 0;
-    while (idx < self.transitions.len and source_idx < sources.len) {
-        if (self.transitions[idx].source == sources[source_idx]) {
-            const start = idx;
-            while (idx < self.transitions.len and self.transitions[idx].source == sources[source_idx]) : (idx += 1) {}
-            var buf: [res.len + idx - start]Transition = undefined;
-            std.mem.copy(Transition, &buf, res);
-            std.mem.copy(Transition, buf[res.len..], self.transitions[start..idx]);
-            res = &buf;
-            source_idx += 1;
-            continue;
-        } else if (self.transitions[idx].source > sources[source_idx]) {
-            source_idx += 1;
-            continue;
-        }
-        idx += 1;
-    }
-    return res;
 }
 
 fn transitionsFrom(comptime self: Self, comptime source: usize) []const Transition {
@@ -635,7 +608,7 @@ test "Test automaton building blocks" {
         } }, a);
 
         const b = single('b');
-        const @"a·b" = concat(a, b).removeDeadStates();
+        const @"a·b" = concat(a, b);
         try expectEqualAutomata(.{ .final_states = &.{2}, .transitions = &.{
             .{
                 .source = 0,
@@ -649,7 +622,7 @@ test "Test automaton building blocks" {
             },
         } }, @"a·b");
 
-        const @"a|b" = alt(a, b).removeDeadStates();
+        const @"a|b" = alt(a, b);
         try expectEqualAutomata(.{ .final_states = &.{ 1, 2 }, .transitions = &.{
             .{
                 .source = 0,
@@ -663,7 +636,7 @@ test "Test automaton building blocks" {
             },
         } }, @"a|b");
 
-        const @"a?" = opt(a).removeDeadStates();
+        const @"a?" = opt(a);
         try expectEqualAutomata(.{ .final_states = &.{ 0, 1 }, .transitions = &.{
             .{
                 .source = 0,
@@ -672,7 +645,7 @@ test "Test automaton building blocks" {
             },
         } }, @"a?");
 
-        const @"a*" = star(a).removeDeadStates();
+        const @"a*" = star(a);
         try expectEqualAutomata(.{ .final_states = &.{ 0, 1 }, .transitions = &.{
             .{
                 .source = 0,
@@ -686,7 +659,7 @@ test "Test automaton building blocks" {
             },
         } }, @"a*");
 
-        const @"a+" = plus(a).removeDeadStates();
+        const @"a+" = plus(a);
         try expectEqualAutomata(.{ .final_states = &.{1}, .transitions = &.{
             .{
                 .source = 0,
@@ -827,7 +800,6 @@ const SortedList = CtSortedList(usize);
 // TODO minimize function
 // TODO: Split into more files
 // TODO Thoroughly test this as well as the assumption about dead states
-/// If self has had dead states removed, the resulting DFA will have no dead nodes
 pub fn determinize(comptime self: Self) Self {
     if (self.isDfa()) return self;
 
@@ -847,6 +819,7 @@ pub fn determinize(comptime self: Self) Self {
 
     // TODO: Do this in place in old_transitions, no new_transitions
     //   For new states, first copy from old transitions then reduce again
+    //   currently new states don't reduce at all
 
     // Go through all states
     // Go backwards to reduce the amount of moves when removing transitions
@@ -874,7 +847,6 @@ pub fn determinize(comptime self: Self) Self {
         };
         if (transition_slice.len == 0) continue;
 
-        // TODO: Review, should be fine though
         var base_transition_idx = transition_slice.start + transition_slice.len - 1;
         while (base_transition_idx > transition_slice.start) {
             const base_transition = old_transitions.items[base_transition_idx];
@@ -951,7 +923,8 @@ pub fn determinize(comptime self: Self) Self {
         .final_states = final_states.items,
     };
 
-    // TODO: Prove that this is correct (no dead nodes, sorting preserve)
+    // TODO: Prove that this is correct (no unreachable nodes, sorting preserve)
+    //   New states could potentially be dead, look for example
     // For new states, copy over remaining transitions from corresponding old states
     for (new_states[old_state_max + 1 ..]) |old_states, off| {
         const new_state = off + old_state_max + 1;
@@ -963,10 +936,15 @@ pub fn determinize(comptime self: Self) Self {
         for (new_transitions.items[start_source_fix..]) |*t| t.source = new_state;
     }
 
-    for (new_transitions.items) |t| @compileLog(t);
-
     return .{
         .final_states = final_states.items,
         .transitions = new_transitions.items,
     };
 }
+
+// TODO: See if we can make all algorithms guarantee that
+//   1) their outputs contain no dead or unreachable states if their inputs don't
+//   2) their transitions are sorted and were so without std.sort.sort call
+// If 1 is not possible, we will need removeDeadStates and/or removeUnreachableStates and call it where needed
+
+// TODO: assertNoDeadOrUnreachableStates()

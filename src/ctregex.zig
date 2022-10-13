@@ -137,6 +137,7 @@ fn astToAutomatonInner(comptime curr: PcreGrammar.AstNode) FiniteAutomaton {
     const single = FiniteAutomaton.single;
     return switch (curr) {
         .string => |s| .{
+            // TODO Output a single transition with a string input
             .final_states = &.{s.len},
             .transitions = blk: {
                 var res: [s.len]FiniteAutomaton.Transition = undefined;
@@ -152,22 +153,22 @@ fn astToAutomatonInner(comptime curr: PcreGrammar.AstNode) FiniteAutomaton {
         },
         .char => |c| single(c),
         .sequence => |seq| seq_fa: {
-            var fa = astToAutomatonInner(seq[0]).concat(astToAutomatonInner(seq[1])).removeDeadStates();
+            var fa = astToAutomatonInner(seq[0]).concat(astToAutomatonInner(seq[1]));
             for (seq[2..]) |ast| {
-                fa = fa.concat(astToAutomatonInner(ast)).removeDeadStates();
+                fa = fa.concat(astToAutomatonInner(ast));
             }
             break :seq_fa fa;
         },
         .alternation => |seq| seq_fa: {
-            var fa = astToAutomatonInner(seq[0]).alt(astToAutomatonInner(seq[1])).removeDeadStates();
+            var fa = astToAutomatonInner(seq[0]).alt(astToAutomatonInner(seq[1]));
             for (seq[2..]) |ast| {
-                fa = fa.alt(astToAutomatonInner(ast)).removeDeadStates();
+                fa = fa.alt(astToAutomatonInner(ast));
             }
             break :seq_fa fa;
         },
-        .star => |ast| astToAutomatonInner(ast.*).star().removeDeadStates(),
-        .plus => |ast| astToAutomatonInner(ast.*).plus().removeDeadStates(),
-        .optional => |ast| astToAutomatonInner(ast.*).opt().removeDeadStates(),
+        .star => |ast| astToAutomatonInner(ast.*).star(),
+        .plus => |ast| astToAutomatonInner(ast.*).plus(),
+        .optional => |ast| astToAutomatonInner(ast.*).opt(),
     };
 }
 
@@ -475,11 +476,7 @@ pub fn match(
 //   is as expected
 
 test "DFA match" {
-    // comptime literal, rt literal -> 2_872
-    // comptime fbs, rt fbs -> 2_983
-    // comptime literal, rt fixedBufferStream -> 2_872
-    // comptime fbs, rt literal -> 2_983
-    @setEvalBranchQuota(2_983);
+    @setEvalBranchQuota(3_450);
     comptime {
         var fbs = std.io.fixedBufferStream("abdefé");
         std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", fbs.reader()));

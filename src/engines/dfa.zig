@@ -60,7 +60,7 @@ pub inline fn matchSlice(
         else => error.DecodeError,
     };
 
-    var state: std.math.IntFittingRange(0, automaton.size() - 1) = 0;
+    var state: std.math.IntFittingRange(0, automaton.stateCount() - 1) = 0;
     var input_idx: usize = 0;
     matching: while (input_idx < input.len) {
         const char = nextChar(
@@ -136,7 +136,7 @@ pub inline fn matchReader(
         else => error.DecodeError,
     };
 
-    var state: std.math.IntFittingRange(0, automaton.size() - 1) = 0;
+    var state: std.math.IntFittingRange(0, automaton.stateCount() - 1) = 0;
     matching: while (true) {
         const char = readNextChar(
             options.encoding,

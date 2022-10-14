@@ -47,6 +47,7 @@ const PcreGrammar = struct {
         return .{ .reject = std.fmt.bufPrint(&buff, fmt, values) catch unreachable };
     }
 
+    // Construct our FA through actions called by the LL parser
     pub fn applyAction(
         comptime act: Symbol.Action,
         comptime prev_term: u21,
@@ -66,6 +67,7 @@ const PcreGrammar = struct {
         };
     }
 
+    // LL1 table
     pub fn table(comptime symbol: Symbol, comptime new_term: u21) LL.Move(Symbol) {
         return switch (symbol) {
             .start => switch (new_term) {
@@ -133,6 +135,7 @@ pub const MatchOptions = struct {
     decodeErrorMode: DecodeErrorMode = .@"error",
 };
 
+// Return type of nextChar.* engine functions
 pub fn NextChar(
     comptime encoding: Encoding,
     comptime single_char: bool,
@@ -250,15 +253,10 @@ pub fn match(
 }
 
 test "DFA match" {
-    @setEvalBranchQuota(4_500);
+    @setEvalBranchQuota(1_397);
     comptime {
         var fbs = std.io.fixedBufferStream("abaghi");
-
-        const patt = "ab(def*é|aghi|abz)";
-        const patt_cpy = patt.*;
-
-        std.debug.assert(try match(.{ .encoding = .utf8 }, patt, fbs.reader()));
-        std.debug.assert(!try match(.{ .encoding = .utf8 }, &patt_cpy, fbs.reader()));
+        std.debug.assert(try match(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)", fbs.reader()));
         //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
     }
 

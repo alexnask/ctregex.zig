@@ -19,10 +19,11 @@ pub const epsilon = Self{
 
 // TODO, range, string, any_of etc. labels?
 //   Only try after we have completed the finite_automaton systems
-const Label = u21;
+const Label = u32;
 
-// TODO: Remove memcpys for [..].* = [..].*; where possible
-pub const Transition = struct {
+// We use an extern struct here because we are copying transitions all over the place
+// so using buf[0..len].* = slice[0..slice.len].* instead of mem.copy saves a lot of branches
+pub const Transition = extern struct {
     source: usize,
     target: usize,
 
@@ -31,11 +32,6 @@ pub const Transition = struct {
 
 final_states: []const usize,
 transitions: []const Transition,
-
-// TODO New names
-//   Unreachable state: Cannot be reached from the start state through any set of transitions
-//   Dead state: Cannot reach any final state through any set of transitions
-// Document guarantees about dead and unreachable nodes for every function, remove them when necessary in here
 
 fn startReachableAndTransitions(comptime self: Self) std.meta.Tuple(&.{ bool, []const Transition }) {
     var start_transitions: []const Transition = undefined;
@@ -60,7 +56,7 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
     const rhs_start_transitions = rhs_start_reachable_transitions[1];
 
     // Offset to be added to states from rhs
-    const rhs_offset = lhs.size() - if (rhs_start_reachable) 0 else 1;
+    const rhs_offset = lhs.stateCount() - if (rhs_start_reachable) 0 else 1;
 
     // Works because final_states are not empty and are sorted
     const rhs_start_final = rhs.final_states[0] == 0;
@@ -76,7 +72,8 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
     ]usize = undefined;
     if (rhs_start_final) {
         // If both lhs and rhs final states are sorted, the result will be sorted
-        std.mem.copy(usize, &final_states, lhs.final_states);
+        final_states[0..lhs.final_states.len].* = lhs.final_states[0..].*;
+
         for (final_states[lhs.final_states.len..][0 .. rhs.final_states.len - rhs_final_state_offset]) |*s, idx|
             s.* = rhs.final_states[idx + rhs_final_state_offset] + rhs_offset;
     } else for (final_states[0 .. rhs.final_states.len - rhs_final_state_offset]) |*s, idx|
@@ -86,7 +83,7 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
     const new_transition_count = lhs.final_states.len * rhs_start_transitions.len;
     const copy_from_rhs_count = if (rhs_start_reachable) rhs.transitions.len else rhs.transitions.len - rhs_start_transitions.len;
     var transitions: [lhs.transitions.len + copy_from_rhs_count + new_transition_count]Transition = undefined;
-    std.mem.copy(Transition, &transitions, lhs.transitions);
+    transitions[0..lhs.transitions.len].* = lhs.transitions[0..].*;
 
     var transition_idx = lhs.transitions.len;
     for (lhs.final_states) |s| {
@@ -100,7 +97,7 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
         }
     }
 
-    // TODO: Interleaf copies from original, then when in final state copy the new ones, then till next final state etc.
+    // TODO: Interleave copies from original, then when in final state copy the new ones, then till next final state etc.
     //   This way we can avoid sorting here
     std.sort.sort(
         Transition,
@@ -138,7 +135,7 @@ pub fn alt(comptime lhs: Self, comptime rhs: Self) Self {
 
     // Offset to be added to states from rhs, we need 1 extra for the initial state we insert
     const lhs_offset = if (lhs_start_reachable) 1 else 0;
-    const rhs_offset = lhs.size() + lhs_offset - if (rhs_start_reachable) 0 else 1;
+    const rhs_offset = lhs.stateCount() + lhs_offset - if (rhs_start_reachable) 0 else 1;
 
     // If at least one of the start states is final, our new start state also needs to be
     const new_state_final = lhs_start_final or rhs_start_final;
@@ -389,15 +386,7 @@ pub fn isDfa(comptime self: Self) bool {
     return true;
 }
 
-pub fn isFinal(comptime self: Self, comptime state: usize) bool {
-    for (self.final_states) |s| {
-        if (s == state) return true;
-        if (s > state) return false;
-    }
-    return false;
-}
-
-pub fn size(comptime self: Self) usize {
+pub fn stateCount(comptime self: Self) usize {
     var max: usize = 0;
     for (self.transitions) |t| {
         if (t.target > max) max = t.target;
@@ -587,7 +576,7 @@ fn CtSortedList(comptime T: type) type {
     };
 }
 
-// Always iterate with indices
+/// `T` must have a concrete byte representation for branch optimization purposes
 fn CtArrayList(comptime T: type) type {
     return struct {
         items: []T,
@@ -619,12 +608,16 @@ fn CtArrayList(comptime T: type) type {
             self.ensureTotalCapacity(self.items.len + n);
             const old_len = self.items.len;
             self.items.len += n;
-            std.mem.set(T, self.items[old_len..self.items.len], value);
+            // TODO: This crashes the compiler :(
+            // self.items[old_len..].* = [1]bool{value} ** (self.items.len - old_len);
+            for (self.items[old_len..]) |*i| i.* = value;
         }
 
         fn appendSlice(comptime self: *@This(), comptime ts: []const T) void {
             self.ensureTotalCapacity(self.items.len + ts.len);
             self.items.len += ts.len;
+            // TODO: This crashes the compiler :(
+            // self.items[self.items.len - ts.len ..].* = ts[0..ts.len].*;
             const dst = self.items[self.items.len - ts.len ..];
             std.mem.copy(T, dst, ts);
         }
@@ -632,7 +625,11 @@ fn CtArrayList(comptime T: type) type {
         fn insert(comptime self: *@This(), comptime n: usize, comptime t: T) void {
             self.ensureTotalCapacity(self.items.len + 1);
             self.items.len += 1;
-            std.mem.copyBackwards(T, self.items[n + 1 .. self.items.len], self.items[n .. self.items.len - 1]);
+
+            // TODO: This crashes the compiler :(
+            // const to_move = self.items[n .. self.items.len - 1].*;
+            // self.items[n + 1 ..].* = to_move;
+            std.mem.copyBackwards(T, self.items[n + 1 ..], self.items[n .. self.items.len - 1]);
             self.items[n] = t;
         }
 
@@ -643,6 +640,8 @@ fn CtArrayList(comptime T: type) type {
                 return;
             }
 
+            // TODO: This crashes the compiler so we still use the loop :/
+            // self.items[i..new_len].* =  self.items[i + 1 ..].*;
             for (self.items[i..new_len]) |*b, j| b.* = self.items[i + 1 + j];
             self.items[new_len] = undefined;
             self.items.len = new_len;
@@ -654,7 +653,7 @@ fn CtArrayList(comptime T: type) type {
 
             self.capacity = better_capacity;
             var buf: [self.capacity]T = undefined;
-            std.mem.copy(T, &buf, self.items);
+            buf[0..self.items.len].* = self.items[0..self.items.len].*;
             self.items = buf[0..self.items.len];
         }
     };
@@ -729,7 +728,7 @@ fn appendFromSources(
 pub fn determinize(comptime self: Self) Self {
     if (self.isDfa()) return self;
 
-    const old_state_max = self.size() - 1;
+    const old_state_max = self.stateCount() - 1;
     comptime var new_states: []SortedList = blk: {
         var buf: [old_state_max + 1]SortedList = undefined;
         for (buf) |*ns, i| ns.* = .{
@@ -916,5 +915,5 @@ fn removeUnreachableStates(
     final_states.* = new_final_states;
 }
 
-// TODO Uses "Fast brief practical DFA minimization" by Valmari
+// TODO Uses "Fast brief practical DFA minimization" by Antti Valmari
 //  https://www.cs.cmu.edu/~cdm/papers/Valmari12.pdf

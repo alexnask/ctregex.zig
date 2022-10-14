@@ -10,9 +10,8 @@ pub fn Move(comptime Symbol: type) type {
     };
 }
 
-// TODO: Tests
-/// Parse `str` into an AST type based on `Grammar`
-pub fn parse(comptime Grammar: type, comptime str: [:0]const u8) []const Grammar.Subject {
+// We use this to cache by contents of slice instead of pointer
+fn parseInner(comptime Grammar: type, comptime N: usize, comptime str: [N:0]u8) []const Grammar.Subject {
     var stack: []const Grammar.Symbol = &.{Grammar.start_symbol};
     var str_idx: usize = 0;
 
@@ -44,8 +43,25 @@ pub fn parse(comptime Grammar: type, comptime str: [:0]const u8) []const Grammar
                 prev_term = term;
             },
             // TODO: Show error location
-            .reject => |msg| @compileError("Parsing error: " ++ msg),
+            .reject => |msg| {
+                var err_buf: [1024]u8 = undefined;
+                const err = std.fmt.bufPrint(
+                    &err_buf,
+                    \\ Parsing error: {s}
+                    \\       {s}
+                    \\       
+                    ++ &[1]u8{'~'} ** (str_idx - 1) ++ &[1]u8{'^'},
+                    .{ msg, str[0 .. str_idx + cp_len] },
+                ) catch unreachable;
+                @compileError(err);
+            },
             .accept => return subject,
         }
     }
+}
+
+// TODO: Tests
+/// Parse `str` into type based on `Grammar` and execute grammar defined actions that can manipulate and return subjects
+pub fn parse(comptime Grammar: type, comptime str: [:0]const u8) []const Grammar.Subject {
+    return parseInner(Grammar, str.len, str[0..str.len].*);
 }

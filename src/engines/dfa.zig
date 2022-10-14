@@ -79,9 +79,7 @@ pub inline fn matchSlice(
 
         // Matched no transitions and not at end of stream
         // If we report decoding errors and we are in single char mode, check for an encoding error
-        if (single_char and options.decodeErrorMode == .@"error" and
-            options.encoding != .ascii and options.encoding != .codepoint)
-        {
+        if (single_char and options.decodeErrorMode == .@"error") {
             const last_char = input[input_idx - 1];
             const length = switch (options.encoding) {
                 .ascii, .codepoint => unreachable,
@@ -146,6 +144,7 @@ pub inline fn matchReader(
             @TypeOf(reader),
             reader,
         ) catch |err| {
+            // We use if-else here and not switch because the error set depends on options
             if (err == error.EndOfStream) {
                 inline for (automaton.final_states) |fs| {
                     if (fs == state) return true;

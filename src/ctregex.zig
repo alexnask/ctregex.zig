@@ -10,15 +10,6 @@ pub const Encoding = unicode.Encoding;
 // TODO Gradually add PCRE features, mention what we support in readme
 //   and test all of them in all option combinations possible
 const PcreGrammar = struct {
-    const AstNode = union(enum) {
-        string: []const u21,
-        char: u21,
-        sequence: []const AstNode,
-        alternation: []const AstNode,
-        star: *const AstNode,
-        plus: *const AstNode,
-        optional: *const AstNode,
-    };
     pub const Subject = FiniteAutomaton;
 
     pub const Symbol = union(enum) {
@@ -51,7 +42,6 @@ const PcreGrammar = struct {
         return .{ .action = t };
     }
 
-    /// Should only be called at comptime
     fn reject(comptime fmt: []const u8, comptime values: anytype) LL.Move(Symbol) {
         var buff: [std.fmt.count(fmt, values)]u8 = undefined;
         return .{ .reject = std.fmt.bufPrint(&buff, fmt, values) catch unreachable };
@@ -117,7 +107,7 @@ const PcreGrammar = struct {
             ),
             .term => |t| if (t == new_term) .pop else reject("Expected '{s}', got '{s}'", .{
                 ctUtf8EncodeChar(t),
-                ctUtf8EncodeChar(new_term),
+                if (new_term == 0) "EOF" else ctUtf8EncodeChar(new_term),
             }),
             // Handled by LL
             .action => unreachable,
@@ -220,12 +210,16 @@ pub fn MatchResult(
     std.debug.todo("NFA engine, determine when to use NFA in .auto");
 }
 
-// TODO: Try to split the slice into an array and a length if caching does not work after copying literal to a var buffer
-//   and using that slice
-// We use this function to cache determinized automata
-fn cachedDeterminize(comptime pattern: [:0]const u8) FiniteAutomaton {
+// We deconstruct slices into this and cachedDeterminize to cache for
+// different slices with the same contents
+fn cachedAutomaton(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    // TODO: Minimize here? or minimize only after determinize?
+    return comptime LL.parse(PcreGrammar, &pattern)[0];
+}
+
+fn cachedDeterminize(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
     // TODO: Minimize here
-    return comptime LL.parse(PcreGrammar, pattern)[0].determinize();
+    return comptime LL.parse(PcreGrammar, &pattern)[0].determinize();
 }
 
 pub fn match(
@@ -235,19 +229,14 @@ pub fn match(
 ) MatchResult(options, pattern, @TypeOf(input)) {
     const Char = options.encoding.CharT();
 
-    // TODO: minimize here as well as after determinize?
-    comptime var automaton = LL.parse(PcreGrammar, pattern)[0];
+    // TODO NFA engine and auto detection
+    const engine = dfa;
+    const automaton = comptime cachedDeterminize(pattern.len, pattern[0..pattern.len].*);
 
     // If we can always just use the first character to check for a transition, do it
     const single_char = comptime automaton.singleCharBoundInEncoding(options.encoding);
     if (options.encoding == .ascii and !single_char)
         @compileError("Found non ascii characters in regex while in .ascii mode");
-
-    // TODO: NFA engine
-    const engine = dfa;
-    if (engine == dfa) {
-        automaton = comptime cachedDeterminize(pattern);
-    }
 
     // Switch to correct engine function
     switch (comptime inputKind(options.encoding, @TypeOf(input))) {
@@ -261,10 +250,15 @@ pub fn match(
 }
 
 test "DFA match" {
-    @setEvalBranchQuota(1_700);
+    @setEvalBranchQuota(4_500);
     comptime {
-        var fbs = std.io.fixedBufferStream("abdefé");
-        std.debug.assert(try match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
+        var fbs = std.io.fixedBufferStream("abaghi");
+
+        const patt = "ab(def*é|aghi|abz)";
+        const patt_cpy = patt.*;
+
+        std.debug.assert(try match(.{ .encoding = .utf8 }, patt, fbs.reader()));
+        std.debug.assert(!try match(.{ .encoding = .utf8 }, &patt_cpy, fbs.reader()));
         //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
     }
 

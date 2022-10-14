@@ -18,7 +18,7 @@ const PcreGrammar = struct {
         plus: *const AstNode,
         optional: *const AstNode,
     };
-    pub const Subject = AstNode;
+    pub const Subject = FiniteAutomaton;
 
     pub const Symbol = union(enum) {
         const Action = enum {
@@ -59,28 +59,22 @@ const PcreGrammar = struct {
     pub fn applyAction(
         comptime act: Symbol.Action,
         comptime prev_term: u21,
-        comptime subject: []const AstNode,
-    ) []const AstNode {
+        comptime subject: []const FiniteAutomaton,
+    ) []const FiniteAutomaton {
+        const single = FiniteAutomaton.single;
+        const alt = FiniteAutomaton.alt;
+        const concat = FiniteAutomaton.concat;
+
         return switch (act) {
-            .char => &[1]AstNode{.{ .char = prev_term }} ++ subject,
+            .char => &[1]FiniteAutomaton{single(prev_term)} ++ subject,
             // .sequence and .alternation check for existing symbols they can just add to, otherwise they create it and invert
             //   the operands from the stack
             // Additionally, .sequence will also concatenate multiple characters into a string
-            .sequence => if (subject[0] == .char and subject[1] == .char)
-                &[1]AstNode{.{ .string = &.{ subject[1].char, subject[0].char } }} ++ subject[2..]
-            else if (subject[0] == .char and subject[1] == .string)
-                &[1]AstNode{.{ .string = subject[1].string ++ &[1]u21{subject[0].char} }} ++ subject[2..]
-            else if (subject[1] == .sequence)
-                &[1]AstNode{.{ .sequence = subject[1].sequence ++ &[1]AstNode{subject[0]} }} ++ subject[2..]
-            else
-                &[1]AstNode{.{ .sequence = &[2]AstNode{ subject[1], subject[0] } }} ++ subject[2..],
-            .alternation => if (subject[1] == .alternation)
-                &[1]AstNode{.{ .alternation = subject[1].alternation ++ &[1]AstNode{subject[0]} }} ++ subject[2..]
-            else
-                &[1]AstNode{.{ .alternation = &[2]AstNode{ subject[1], subject[0] } }} ++ subject[2..],
-            .star => &[1]AstNode{.{ .star = &subject[0] }} ++ subject[1..],
-            .plus => &[1]AstNode{.{ .plus = &subject[0] }} ++ subject[1..],
-            .optional => &[1]AstNode{.{ .optional = &subject[0] }} ++ subject[1..],
+            .sequence => &[1]FiniteAutomaton{concat(subject[1], subject[0])} ++ subject[2..],
+            .alternation => &[1]FiniteAutomaton{alt(subject[1], subject[0])} ++ subject[2..],
+            .star => &[1]FiniteAutomaton{subject[0].star()} ++ subject[1..],
+            .plus => &[1]FiniteAutomaton{subject[0].plus()} ++ subject[1..],
+            .optional => &[1]FiniteAutomaton{subject[0].opt()} ++ subject[1..],
         };
     }
 
@@ -132,36 +126,6 @@ const PcreGrammar = struct {
         };
     }
 };
-
-fn astToAutomatonInner(comptime curr: PcreGrammar.AstNode) FiniteAutomaton {
-    const single = FiniteAutomaton.single;
-    return switch (curr) {
-        .string => |s| FiniteAutomaton.string(s),
-        .char => |c| single(c),
-        .sequence => |seq| seq_fa: {
-            var fa = astToAutomatonInner(seq[0]).concat(astToAutomatonInner(seq[1]));
-            for (seq[2..]) |ast| {
-                fa = fa.concat(astToAutomatonInner(ast));
-            }
-            break :seq_fa fa;
-        },
-        .alternation => |seq| seq_fa: {
-            var fa = astToAutomatonInner(seq[0]).alt(astToAutomatonInner(seq[1]));
-            for (seq[2..]) |ast| {
-                fa = fa.alt(astToAutomatonInner(ast));
-            }
-            break :seq_fa fa;
-        },
-        .star => |ast| astToAutomatonInner(ast.*).star(),
-        .plus => |ast| astToAutomatonInner(ast.*).plus(),
-        .optional => |ast| astToAutomatonInner(ast.*).opt(),
-    };
-}
-
-fn astToAutomaton(comptime ast: []const PcreGrammar.AstNode) FiniteAutomaton {
-    std.debug.assert(ast.len == 1);
-    return astToAutomatonInner(ast[0]);
-}
 
 const dfa = struct {
     // TODO: Move this to global scope, use it from matchReader as well and in the nfa engine
@@ -431,9 +395,12 @@ pub fn MatchResult(
     std.debug.todo("NFA engine, determine when to use NFA in .auto");
 }
 
+// TODO: Try to split the slice into an array and a length if caching does not work after copying literal to a var buffer
+//   and using that slice
 // We use this function to cache determinized automata
 fn cachedDeterminize(comptime pattern: [:0]const u8) FiniteAutomaton {
-    return comptime astToAutomaton(LL.parse(PcreGrammar, pattern)).determinize();
+    // TODO: Minimize here
+    return comptime LL.parse(PcreGrammar, pattern)[0].determinize();
 }
 
 pub fn match(
@@ -443,8 +410,8 @@ pub fn match(
 ) MatchResult(options, pattern, @TypeOf(input)) {
     const Char = options.encoding.CharT();
 
-    // TODO: minimize
-    comptime var automaton = astToAutomaton(LL.parse(PcreGrammar, pattern));
+    // TODO: minimize here as well as after determinize?
+    comptime var automaton = LL.parse(PcreGrammar, pattern)[0];
 
     // If we can always just use the first character to check for a transition, do it
     const single_char = comptime automaton.singleCharBoundInEncoding(options.encoding);
@@ -469,8 +436,7 @@ pub fn match(
 }
 
 test "DFA match" {
-    // TODO: Was 1500 before removeUnreachableStates
-    @setEvalBranchQuota(1_600);
+    @setEvalBranchQuota(1_700);
     comptime {
         var fbs = std.io.fixedBufferStream("abdefé");
         std.debug.assert(try match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));

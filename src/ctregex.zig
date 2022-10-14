@@ -136,21 +136,7 @@ const PcreGrammar = struct {
 fn astToAutomatonInner(comptime curr: PcreGrammar.AstNode) FiniteAutomaton {
     const single = FiniteAutomaton.single;
     return switch (curr) {
-        .string => |s| .{
-            // TODO Output a single transition with a string input
-            .final_states = &.{s.len},
-            .transitions = blk: {
-                var res: [s.len]FiniteAutomaton.Transition = undefined;
-                for (res) |*t, idx| {
-                    t.* = .{
-                        .source = idx,
-                        .target = idx + 1,
-                        .input = .{ .single = s[idx] },
-                    };
-                }
-                break :blk &res;
-            },
-        },
+        .string => |s| FiniteAutomaton.string(s),
         .char => |c| single(c),
         .sequence => |seq| seq_fa: {
             var fa = astToAutomatonInner(seq[0]).concat(astToAutomatonInner(seq[1]));
@@ -177,185 +163,191 @@ fn astToAutomaton(comptime ast: []const PcreGrammar.AstNode) FiniteAutomaton {
     return astToAutomatonInner(ast[0]);
 }
 
-inline fn inputMatchesChar(comptime input: FiniteAutomaton.Input, char: anytype) bool {
-    return switch (input) {
-        .single => |c| char == c,
-        .range => |r| char >= r.start and char <= r.end,
-        .any_of => |seq| {
-            inline for (seq) |i| {
-                if (inputMatchesChar(i, char)) return true;
-            }
-            return false;
-        },
-    };
-}
+const dfa = struct {
+    // TODO: Move this to global scope, use it from matchReader as well and in the nfa engine
+    // TODO: Could maybe abstract further so that slice and Reader come from the same body?
+    // Always includes an error union to be able to try or catch with any settings
+    fn NextChar(
+        comptime encoding: Encoding,
+        comptime single_char: bool,
+        comptime additional_errors: type,
+    ) type {
+        return if (single_char)
+            additional_errors!encoding.CharT()
+        else switch (encoding) {
+            .ascii, .codepoint => additional_errors!encoding.CharT(),
+            .utf8, .utf16le => (error{DecodeError} || additional_errors)!u21,
+        };
+    }
 
-inline fn dfaMatchSlice(
-    comptime options: MatchOptions,
-    comptime automaton: FiniteAutomaton,
-    comptime isSingleCharBound: bool,
-    input: []const options.encoding.CharT(),
-) MatchError(
-    options.encoding,
-    options.decodeErrorMode,
-    []const options.encoding.CharT(),
-)!bool {
-    const decode_err_value = switch (options.decodeErrorMode) {
-        .fail => false,
-        else => error.DecodeError,
-    };
-
-    var state: std.math.IntFittingRange(0, automaton.size() - 1) = 0;
-    var input_idx: usize = 0;
-    matching: while (input_idx < input.len) {
-        const char = if (isSingleCharBound) blk: {
-            defer input_idx += 1;
-            break :blk input[input_idx];
-        } else switch (options.encoding) {
-            .ascii, .codepoint => blk: {
-                defer input_idx += 1;
-                break :blk input[input_idx];
+    // We use an implicit error union to get an empty error union when necessary and be able to catch later on
+    inline fn nextChar(
+        comptime encoding: Encoding,
+        comptime single_char: bool,
+        input: []const encoding.CharT(),
+        input_idx: *usize,
+    ) NextChar(encoding, single_char, error{}) {
+        if (single_char) {
+            defer input_idx.* += 1;
+            return input[input_idx.*];
+        } else switch (encoding) {
+            .ascii, .codepoint => {
+                defer input_idx.* += 1;
+                return input[input_idx.*];
             },
-            .utf8 => blk: {
-                const length = std.unicode.utf8ByteSequenceLength(input[input_idx]) catch return decode_err_value;
-                defer input_idx += length;
-                if (length == 1) break :blk input[input_idx];
-                if (input_idx + length > input.len) return decode_err_value;
-                break :blk switch (length) {
-                    2 => std.unicode.utf8Decode2(input[input_idx..]) catch return decode_err_value,
-                    3 => std.unicode.utf8Decode3(input[input_idx..]) catch return decode_err_value,
-                    4 => std.unicode.utf8Decode4(input[input_idx..]) catch return decode_err_value,
+            .utf8 => {
+                const length = std.unicode.utf8ByteSequenceLength(input[input_idx.*]) catch return error.DecodeError;
+                defer input_idx.* += length;
+                if (length == 1) return input[input_idx.*];
+                if (input_idx.* + length > input.len) return error.DecodeError;
+                return switch (length) {
+                    2 => std.unicode.utf8Decode2(input[input_idx.*..]) catch return error.DecodeError,
+                    3 => std.unicode.utf8Decode3(input[input_idx.*..]) catch return error.DecodeError,
+                    4 => std.unicode.utf8Decode4(input[input_idx.*..]) catch return error.DecodeError,
                     else => unreachable,
                 };
             },
-            .utf16le => blk: {
-                const length = unicode.utf16leCharSequenceLength(input[input_idx]) catch return decode_err_value;
-                defer input_idx += length;
-                if (length == 1) break :blk input[input_idx];
-                if (input_idx + 2 > input.len) return decode_err_value;
-                return unicode.utf16leDecode(input[input_idx..][0..2]) catch return decode_err_value;
+            .utf16le => {
+                const length = unicode.utf16leCharSequenceLength(input[input_idx.*]) catch return error.DecodeError;
+                defer input_idx.* += length;
+                if (length == 1) return input[input_idx.*];
+                if (input_idx.* + 2 > input.len) return error.DecodeError;
+                return unicode.utf16leDecode(input[input_idx.*..][0..2]) catch return error.DecodeError;
             },
+        }
+    }
+
+    pub inline fn matchSlice(
+        comptime options: MatchOptions,
+        comptime automaton: FiniteAutomaton,
+        comptime single_char: bool,
+        input: []const options.encoding.CharT(),
+    ) MatchError(
+        options.encoding,
+        options.decodeErrorMode,
+        []const options.encoding.CharT(),
+    )!bool {
+        const decode_err_value = switch (options.decodeErrorMode) {
+            .fail => false,
+            else => error.DecodeError,
         };
 
-        inline for (automaton.transitions) |t| {
-            if (t.source == state and inputMatchesChar(t.input, char)) {
-                state = t.target;
-                continue :matching;
+        var state: std.math.IntFittingRange(0, automaton.size() - 1) = 0;
+        var input_idx: usize = 0;
+        matching: while (input_idx < input.len) {
+            const char = nextChar(
+                options.encoding,
+                single_char,
+                input,
+                &input_idx,
+            ) catch return decode_err_value;
+
+            inline for (automaton.transitions) |t| {
+                if (t.source == state and t.label == char) {
+                    state = t.target;
+                    continue :matching;
+                }
             }
+
+            // Matched no transitions and not at end of stream
+            // If we report decoding errors and we are in single char mode, check for an encoding error
+            if (single_char and options.decodeErrorMode == .@"error" and
+                options.encoding != .ascii and options.encoding != .codepoint)
+            {
+                const last_char = input[input_idx - 1];
+                const length = switch (options.encoding) {
+                    .ascii, .codepoint => unreachable,
+                    .utf8 => std.unicode.utf8ByteSequenceLength(last_char) catch return error.DecodeError,
+                    .utf16le => unicode.utf16leDecode(last_char) catch return error.DecodeError,
+                };
+                if (input_idx - 1 + length > input.len) return error.DecodeError;
+                // We need the checks from the decoding functions too here
+                _ = switch (options.encoding) {
+                    .ascii, .codepoint => unreachable,
+                    .utf8 => std.unicode.utf8Decode(input[input_idx - 1 ..][0..length]) catch return error.DecodeError,
+                    .utf16le => unicode.utf16leDecode(input[input_idx - 1 ..][0..length]) catch return error.DecodeError,
+                };
+            }
+
+            return false;
         }
 
-        // Matched no transitions and not at end of stream
-        // If we report decoding errors and we are in single char mode, check for an encoding error
-        if (isSingleCharBound and options.decodeErrorMode == .@"error" and
-            options.encoding != .ascii and options.encoding != .codepoint)
-        {
-            const last_char = input[input_idx - 1];
-            const length = switch (options.encoding) {
-                .ascii, .codepoint => unreachable,
-                .utf8 => std.unicode.utf8ByteSequenceLength(last_char) catch return error.DecodeError,
-                .utf16le => unicode.utf16leDecode(last_char) catch return error.DecodeError,
-            };
-            if (input_idx - 1 + length > input.len) return error.DecodeError;
-            // We need the checks from the decoding functions too here
-            _ = switch (options.encoding) {
-                .ascii, .codepoint => unreachable,
-                .utf8 => std.unicode.utf8Decode(input[input_idx - 1 ..][0..length]) catch return error.DecodeError,
-                .utf16le => unicode.utf16leDecode(input[input_idx - 1 ..][0..length]) catch return error.DecodeError,
-            };
+        // We are now at the end of the stream, check if we are in a final state
+        inline for (automaton.final_states) |fs| {
+            if (fs == state) return true;
         }
-
         return false;
     }
 
-    // We are now at the end of the stream, check if we are in a final state
-    inline for (automaton.final_states) |fs| {
-        if (fs == state) return true;
-    }
-    return false;
-}
-
-inline fn dfaMatchReader(
-    comptime options: MatchOptions,
-    comptime automaton: FiniteAutomaton,
-    comptime isSingleCharBound: bool,
-    reader: anytype,
-) MatchError(
-    options.encoding,
-    options.decodeErrorMode,
-    @TypeOf(reader),
-)!bool {
-    // TODO: Move this outside of this function to cache, pass isSingleCharBound + options.encoding + Reader.Error
-    const ReaderError = @TypeOf(reader).Error;
-    const ReadError = if (isSingleCharBound) error{EndOfStream} || ReaderError else switch (options.encoding) {
-        .ascii, .codepoint => error{EndOfStream} || ReaderError,
-        else => error{ EndOfStream, DecodeError } || ReaderError,
-    };
-
-    const readFn = if (isSingleCharBound)
-        switch (options.encoding) {
-            .ascii, .utf8 => @TypeOf(reader).readByte,
-            .utf16le => struct {
-                inline fn f(r: @TypeOf(reader)) !u16 {
-                    return try r.readIntLittle(u16);
-                }
-            }.f,
-            .codepoint => struct {
-                inline fn f(r: @TypeOf(reader)) !u21 {
-                    return @truncate(u21, try r.readIntNative(u32));
-                }
-            }.f,
-        }
-    else
-        struct {
-            inline fn f(r: @TypeOf(reader)) !u21 {
-                return try options.encoding.readCodepoint(r);
-            }
-        }.f;
-
-    var state: std.math.IntFittingRange(0, automaton.size() - 1) = 0;
-    matching: while (true) {
-        const char = if (ReadError == error{EndOfStream})
-            readFn(reader) catch {
-                // We are now at the end of the stream, check if we are in a final state
-                inline for (automaton.final_states) |fs| {
-                    if (fs == state) return true;
-                }
-                return false;
+    inline fn readNextChar(
+        comptime encoding: Encoding,
+        comptime single_char: bool,
+        comptime Reader: type,
+        reader: Reader,
+    ) NextChar(encoding, single_char, error{EndOfStream} || Reader.Error) {
+        if (single_char)
+            switch (encoding) {
+                .ascii, .utf8 => return try reader.readByte(),
+                .utf16le => return try reader.readIntLittle(u16),
+                .codepoint => return @truncate(u21, try reader.readIntNative(u32)),
             }
         else
-            readFn(reader) catch |err| switch (err) {
-                error.EndOfStream => {
-                    // We are now at the end of the stream, check if we are in a final state
+            return try encoding.readCodepoint(reader);
+    }
+
+    pub inline fn matchReader(
+        comptime options: MatchOptions,
+        comptime automaton: FiniteAutomaton,
+        comptime single_char: bool,
+        reader: anytype,
+    ) MatchError(
+        options.encoding,
+        options.decodeErrorMode,
+        @TypeOf(reader),
+    )!bool {
+        const decode_err_value = switch (options.decodeErrorMode) {
+            .fail => false,
+            else => error.DecodeError,
+        };
+
+        var state: std.math.IntFittingRange(0, automaton.size() - 1) = 0;
+        matching: while (true) {
+            const char = readNextChar(
+                options.encoding,
+                single_char,
+                @TypeOf(reader),
+                reader,
+            ) catch |err| {
+                if (err == error.EndOfStream) {
                     inline for (automaton.final_states) |fs| {
                         if (fs == state) return true;
                     }
                     return false;
-                },
-                else => |e| inline for (std.meta.tags(@TypeOf(e))) |curr_err| {
-                    if (curr_err == error.DecodeError and curr_err == e) {
-                        return if (options.decodeErrorMode == .fail) false else e;
-                    } else {
-                        return e;
-                    }
-                },
+                } else if (err == error.DecodeError) {
+                    return decode_err_value;
+                } else if (@TypeOf(reader).Error != error{}) {
+                    return @errSetCast(@TypeOf(reader).Error, err);
+                }
+                unreachable;
             };
 
-        inline for (automaton.transitions) |t| {
-            if (t.source == state and inputMatchesChar(t.input, char)) {
-                state = t.target;
-                continue :matching;
+            inline for (automaton.transitions) |t| {
+                if (t.source == state and t.label == char) {
+                    state = t.target;
+                    continue :matching;
+                }
             }
-        }
 
-        // Matched no transitions and not at end of stream
-        // If we report decoding errors and we are in single char mode, check for an encoding error
-        if (isSingleCharBound and options.decodeErrorMode == .@"error") {
-            _ = try options.encoding.readCodepointWithFirstChar(reader, char);
-        }
+            // Matched no transitions and not at end of stream
+            // If we report decoding errors and we are in single char mode, check for an encoding error
+            if (single_char and options.decodeErrorMode == .@"error") {
+                _ = try options.encoding.readCodepointWithFirstChar(reader, char);
+            }
 
-        return false;
+            return false;
+        }
     }
-}
+};
 
 pub const Engine = enum {
     /// dfa if no captures (/backreferences), nfa otherwise
@@ -371,7 +363,7 @@ pub const DecodeErrorMode = enum {
 
 pub const MatchOptions = struct {
     engine: Engine = .auto,
-    encoding: Encoding = .utf8,
+    encoding: Encoding = .ascii,
     decodeErrorMode: DecodeErrorMode = .@"error",
 };
 
@@ -439,34 +431,58 @@ pub fn MatchResult(
     std.debug.todo("NFA engine, determine when to use NFA in .auto");
 }
 
-// TODO: Check that everything caches as wexpected at ast and automaton boundary
+// We use this function to cache determinized automata
+fn cachedDeterminize(comptime pattern: [:0]const u8) FiniteAutomaton {
+    return comptime astToAutomaton(LL.parse(PcreGrammar, pattern)).determinize();
+}
+
 pub fn match(
     comptime options: MatchOptions,
     comptime pattern: [:0]const u8,
     input: anytype,
 ) MatchResult(options, pattern, @TypeOf(input)) {
     const Char = options.encoding.CharT();
-    const ast = comptime LL.parse(PcreGrammar, pattern);
+
     // TODO: minimize
-    const automaton = comptime astToAutomaton(ast).determinize();
+    comptime var automaton = astToAutomaton(LL.parse(PcreGrammar, pattern));
+
+    // If we can always just use the first character to check for a transition, do it
+    const single_char = comptime automaton.singleCharBoundInEncoding(options.encoding);
+    if (options.encoding == .ascii and !single_char)
+        @compileError("Found non ascii characters in regex while in .ascii mode");
 
     // TODO: NFA engine
-    // If we can always just use the first character to check for a transition, do it
-    const isSingleCharBound = comptime automaton.singleCharBoundInEncoding(options.encoding);
-    if (options.encoding == .ascii and !isSingleCharBound)
-        @compileError("Found non ascii characters in regex while in .ascii mode");
+    const engine = dfa;
+    if (engine == dfa) {
+        automaton = comptime cachedDeterminize(pattern);
+    }
 
     // Switch to correct engine function
     switch (comptime inputKind(options.encoding, @TypeOf(input))) {
-        .reader => return try dfaMatchReader(options, automaton, isSingleCharBound, input),
-        .char_slice => return try dfaMatchSlice(options, automaton, isSingleCharBound, @as([]const Char, input)),
+        .reader => return try engine.matchReader(options, automaton, single_char, input),
+        .char_slice => return try engine.matchSlice(options, automaton, single_char, @as([]const Char, input)),
         .byte_slice => {
             var fbs = std.io.fixedBufferStream(@as([]const u8, input));
-            return try dfaMatchReader(options, automaton, isSingleCharBound, fbs.reader());
+            return try engine.matchReader(options, automaton, single_char, fbs.reader());
         },
     }
 }
 
+test "DFA match" {
+    // TODO: Was 1500 before removeUnreachableStates
+    @setEvalBranchQuota(1_600);
+    comptime {
+        var fbs = std.io.fixedBufferStream("abdefé");
+        std.debug.assert(try match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
+        //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
+    }
+
+    try std.testing.expect(try match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", "abdefé"));
+    //var fbs = std.io.fixedBufferStream("abdefé");
+    //try std.testing.expect(try match(.{}, "ab(def)*é|aghi|abz", fbs.reader()));
+}
+// TODO Reorganize files, only keep public interface in this file
+//   Flesh out structure of things, add `std.debug.todo`s
 // TODO Lots and lots of docs
 // TODO startsWithMatch is trivial
 //   We probably need our own writer type to test utf16le and u21
@@ -475,18 +491,4 @@ pub fn match(
 // TODO: Test that the ast is as expected, convert to automaton then test that the automaton
 //   is as expected
 
-test "DFA match" {
-    @setEvalBranchQuota(3_450);
-    comptime {
-        var fbs = std.io.fixedBufferStream("abdefé");
-        std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", fbs.reader()));
-        //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
-    }
-    try std.testing.expect(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
-
-    // TODO Take a look at output assembly, compare in various modes
-    // TODO Test dfaMatchSlice vs dfaMatchReader + fixedBufferStream.reader of encoded buffer for all encodings
-    // for ascii and utf8 this is particularly interesting, they should be equivalent in theory
-}
-// TODO Reorganize files, only keep public interface in this file
-//   Flesh out structure of things, add `std.debug.todo`s
+// TODO: Experiment with creating the nfa directly instead of an intermediary AST

@@ -56,7 +56,7 @@ pub const Encoding = enum {
         };
     }
 
-    inline fn utf8DoNextByte(reader: anytype, value: *u21) !void {
+    inline fn utf8DoNextByte(reader: anytype, value: *u21) (@TypeOf(reader).Error || error{DecodeError})!void {
         const c = reader.readByte() catch |err| switch (err) {
             error.EndOfStream => return error.DecodeError,
             else => |e| return e,

@@ -17,132 +17,16 @@ pub const epsilon = Self{
     .transitions = &.{},
 };
 
-// TODO 'string'?
-pub const Input = union(enum) {
-    single: u21,
-    range: struct {
-        start: u21,
-        /// `end` is inclusive
-        end: u21,
-    },
-    any_of: []const Input,
+// TODO, range, string, any_of etc. labels?
+//   Only try after we have completed the finite_automaton systems
+const Label = u21;
 
-    fn reduce(comptime self: Input) ?Input {
-        return switch (self) {
-            .single => self,
-            .range => |r| if (r.start == r.end) null else self,
-            .any_of => |seq| blk: {
-                if (seq.len == 0) break :blk null;
-                var res: []const Input = &.{};
-                for (seq) |i| {
-                    if (reduce(i)) |r| res = res ++ &.{r};
-                }
-                break :blk res;
-            },
-        };
-    }
-
-    // TODO: Overlap removal tests
-    fn removeOverlap(comptime self: Input, comptime _overlap: Input) ?Input {
-        switch (_overlap) {
-            .any_of => |seq| {
-                var curr: ?Input = self;
-                for (seq) |o| {
-                    curr = curr.removeOverlap(o);
-                    if (curr == null) break;
-                }
-                return curr;
-            },
-            else => {},
-        }
-
-        return switch (self) {
-            .single => |c| switch (_overlap) {
-                .single => |o| if (o == c) null else self,
-                .range => |o| if (c >= o.start and c <= o.end) null else self,
-                .any_of => unreachable,
-            },
-            .range => |r| switch (_overlap) {
-                .single => |o| if (o >= r.start and o <= r.end) blk: {
-                    const ret = switch (o) {
-                        r.start => Input{ .range = .{ .start = r.start + 1, .end = r.end } },
-                        r.end => Input{ .range = .{ .start = r.start, .end = r.end - 1 } },
-                        else => Input{ .any_of = &.{
-                            .{ .range = .{
-                                .start = r.start,
-                                .end = o - 1,
-                            } },
-                            .{ .range = .{ .start = o + 1, .end = r.end } },
-                        } },
-                    };
-                    break :blk reduce(ret);
-                } else self,
-                .range => |o| if (o.start <= r.end)
-                    reduce(.{ .range = .{
-                        .start = std.math.min(r.start, o.start),
-                        .end = o.start,
-                    } })
-                else if (r.start <= o.end)
-                    reduce(.{ .range = .{
-                        .start = std.math.min(r.start, o.start),
-                        .end = std.math.max(r.end, o.end),
-                    } })
-                else
-                    self,
-                .any_of => unreachable,
-            },
-            .any_of => |seq| blk: {
-                const res: []const Input = &.{};
-                for (seq) |i| {
-                    if (i.removeOverlap(_overlap)) |new| res = res ++ &[1]Input{new};
-                }
-                break :blk reduce(.{ .any_of = res });
-            },
-        };
-    }
-
-    fn overlap(comptime lhs: Input, comptime rhs: Input) ?Input {
-        if (rhs == .any_of) return overlap(rhs, lhs);
-
-        return switch (lhs) {
-            .any_of => |seq| {
-                var seq_overlaps_buf: [seq.len]Input = undefined;
-                var seq_overlaps_idx: usize = 0;
-                for (seq) |e| {
-                    if (e.overlap(rhs)) |o| {
-                        seq_overlaps_buf[seq_overlaps_idx] = o;
-                        seq_overlaps_idx += 1;
-                    }
-                }
-                return switch (seq_overlaps_idx) {
-                    0 => null,
-                    1 => seq_overlaps_buf[0],
-                    else => .{ .any_of = seq_overlaps_buf[0..seq_overlaps_idx] },
-                };
-            },
-            .single => |cl| switch (rhs) {
-                .single => |cr| if (cl == cr) .{ .single = cl } else null,
-                .range => |rr| if (cl >= rr.start and cl <= rr.end) .{ .single = cl } else null,
-                .any_of => unreachable,
-            },
-            .range => |rl| switch (rhs) {
-                .single => |cr| if (cr >= rl.start and cr <= rl.end) .{ .single = cr } else null,
-                .range => |rr| if (rr.start <= rl.end) .{
-                    .range = .{ .start = rr.start, .end = rl.end },
-                } else if (rl.start <= rr.end) .{
-                    .range = .{ .start = rl.start, .end = rr.end },
-                } else null,
-                .any_of => unreachable,
-            },
-        };
-    }
-};
-
+// TODO: Remove memcpys for [..].* = [..].*; where possible
 pub const Transition = struct {
     source: usize,
     target: usize,
 
-    input: Input,
+    label: Label,
 };
 
 final_states: []const usize,
@@ -210,7 +94,7 @@ pub fn concat(comptime lhs: Self, comptime rhs: Self) Self {
             transitions[transition_idx] = .{
                 .source = s,
                 .target = t.target + rhs_offset,
-                .input = t.input,
+                .label = t.label,
             };
             transition_idx += 1;
         }
@@ -287,14 +171,14 @@ pub fn alt(comptime lhs: Self, comptime rhs: Self) Self {
         transitions[idx] = .{
             .source = 0,
             .target = t.target + lhs_offset,
-            .input = t.input,
+            .label = t.label,
         };
     }
     for (rhs_start_transitions) |t, idx| {
         transitions[lhs_start_transitions.len + idx] = .{
             .source = 0,
             .target = t.target + rhs_offset,
-            .input = t.input,
+            .label = t.label,
         };
     }
 
@@ -320,19 +204,28 @@ pub fn alt(comptime lhs: Self, comptime rhs: Self) Self {
     };
 }
 
-pub fn input(comptime i: Input) Self {
-    return .{ .final_states = &.{1}, .transitions = &.{.{
-        .source = 0,
-        .target = 1,
-        .input = i,
-    }} };
+pub fn string(comptime s: []const Label) Self {
+    return .{
+        .final_states = &.{s.len},
+        .transitions = blk: {
+            var res: [s.len]Transition = undefined;
+            for (res) |*t, idx| {
+                t.* = .{
+                    .source = idx,
+                    .target = idx + 1,
+                    .label = s[idx],
+                };
+            }
+            break :blk &res;
+        },
+    };
 }
 
 pub fn single(comptime c: u21) Self {
     return .{ .final_states = &.{1}, .transitions = &.{.{
         .source = 0,
         .target = 1,
-        .input = .{ .single = c },
+        .label = c,
     }} };
 }
 
@@ -428,7 +321,7 @@ fn starOrPlus(comptime self: Self, comptime kind: enum { star, plus }) Self {
             transitions[transition_idx] = .{
                 .source = s,
                 .target = t.target + offset,
-                .input = t.input,
+                .label = t.label,
             };
             transition_idx += 1;
         }
@@ -456,53 +349,19 @@ pub fn plus(comptime self: Self) Self {
     return self.starOrPlus(.plus);
 }
 
-fn allInputsLessThan(comptime self: Self, ceil: u21) bool {
+fn allLabelsLessThan(comptime self: Self, ceil: u21) bool {
     for (self.transitions) |t| {
-        switch (t.input) {
-            .single => |c| if (c > ceil) return false,
-            .range => |r| {
-                if (r.start > ceil) return false;
-                if (r.end > ceil) return false;
-            },
-            .any_of => |seq| {
-                for (seq) |i| {
-                    if (!i.allInputsLessThan(ceil)) return false;
-                }
-            },
-        }
+        if (t.label > ceil) return false;
     }
     return true;
 }
 
 pub fn singleCharBoundInEncoding(comptime self: Self, comptime encoding: Encoding) bool {
     return switch (encoding) {
-        .ascii, .utf8 => self.allInputsLessThan(127),
+        .ascii, .utf8 => self.allLabelsLessThan(127),
         .utf16le => {
-            const helper = struct {
-                fn f(i: Input) bool {
-                    switch (i) {
-                        .single => |c| if (c > 0xd7ff and c < 0xe000) return false,
-                        .range => |r| {
-                            // We assume r.start < r.end
-                            // Range start in first u16 range, end outside
-                            if (r.start <= 0xd7ff and r.end > 0xd7ff) return false;
-                            // Range start in u16 gap
-                            if (r.start > 0xd7ff and r.start < 0xe000) return false;
-                            // The range start must be in second u16 range, so the end better be too
-                            if (r.end < 0xe000) return false;
-                            return true;
-                        },
-                        .any_of => |seq| {
-                            for (seq) |s| if (!f(s)) return false;
-                            return true;
-                        },
-                    }
-                    return true;
-                }
-            }.f;
-            // Single u16's are used in the ranges [0x0000, 0xD7FF] and [0xE000, 0xFFFF]
             for (self.transitions) |t| {
-                if (!helper(t.input)) return false;
+                if (t.label > 0xd7ff and t.label < 0xe000) return false;
             }
             return true;
         },
@@ -519,7 +378,7 @@ pub fn isDfa(comptime self: Self) bool {
             for (state_transitions) |t1, j| {
                 var idx = j + 1;
                 while (idx < state_transitions.len) : (idx += 1) {
-                    if (t1.input.overlap(state_transitions[idx].input) != null) return false;
+                    if (t1.label == state_transitions[idx].label) return false;
                 }
             }
             // Trigger checks here before resetting state
@@ -528,6 +387,14 @@ pub fn isDfa(comptime self: Self) bool {
         }
     }
     return true;
+}
+
+pub fn isFinal(comptime self: Self, comptime state: usize) bool {
+    for (self.final_states) |s| {
+        if (s == state) return true;
+        if (s > state) return false;
+    }
+    return false;
 }
 
 pub fn size(comptime self: Self) usize {
@@ -603,7 +470,7 @@ test "Test automaton building blocks" {
             .{
                 .source = 0,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
         } }, a);
 
@@ -613,12 +480,12 @@ test "Test automaton building blocks" {
             .{
                 .source = 0,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
             .{
                 .source = 1,
                 .target = 2,
-                .input = .{ .single = 'b' },
+                .label = 'b',
             },
         } }, @"a·b");
 
@@ -627,12 +494,12 @@ test "Test automaton building blocks" {
             .{
                 .source = 0,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
             .{
                 .source = 0,
                 .target = 2,
-                .input = .{ .single = 'b' },
+                .label = 'b',
             },
         } }, @"a|b");
 
@@ -641,7 +508,7 @@ test "Test automaton building blocks" {
             .{
                 .source = 0,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
         } }, @"a?");
 
@@ -650,12 +517,12 @@ test "Test automaton building blocks" {
             .{
                 .source = 0,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
             .{
                 .source = 1,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
         } }, @"a*");
 
@@ -664,12 +531,12 @@ test "Test automaton building blocks" {
             .{
                 .source = 0,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
             .{
                 .source = 1,
                 .target = 1,
-                .input = .{ .single = 'a' },
+                .label = 'a',
             },
         } }, @"a+");
     }
@@ -696,6 +563,13 @@ fn CtSortedList(comptime T: type) type {
                 if (idx == 0) break;
             }
             self.items = &[1]usize{elem} ++ self.items;
+        }
+
+        fn remove(comptime self: *@This(), comptime idx: usize) void {
+            if (idx == self.items.len - 1)
+                self.items = self.items[0 .. self.items.len - 1]
+            else
+                self.items = self.items[0..idx] ++ self.items[idx..];
         }
 
         fn contains(comptime self: @This(), elem: usize) bool {
@@ -739,6 +613,13 @@ fn CtArrayList(comptime T: type) type {
             self.items.len += 1;
 
             self.items[self.items.len - 1] = t;
+        }
+
+        fn appendNTimes(comptime self: *@This(), comptime value: T, comptime n: usize) void {
+            self.ensureTotalCapacity(self.items.len + n);
+            const old_len = self.items.len;
+            self.items.len += n;
+            std.mem.set(T, self.items[old_len..self.items.len], value);
         }
 
         fn appendSlice(comptime self: *@This(), comptime ts: []const T) void {
@@ -858,7 +739,7 @@ pub fn determinize(comptime self: Self) Self {
     };
 
     // The procedure to determinize `self` is the following:
-    //   Keep a new_state -> {old_states} map
+    //   Keep a new_state -> {old_states...} map
     //    Initialize it with old_state -> {old_state}
     //  For each new_state:
     //    If an old_state, find slice of transitions in `transitions`
@@ -867,15 +748,13 @@ pub fn determinize(comptime self: Self) Self {
     //      If transition_slice.len < 2, continue
     //      Start with base transition = transition_slice[-1]
     //      We will iteratively do the following as long as we have a base transition and at least one more transition:
-    //         Find overlap between base transition and every transition in `transition_slice`,
-    //         modifying inputs and possibly removing transitions that have overlap as we go.
-    //         If we found some overlap, look up the new_state made from the old_states of the overlapping transitions,
-    //           and append a new transition to `transitions`, then modify or remove the base transition
-    //         Fix base index
+    //        Find transitions with the same label as base_transition, removing equivalent transitions as we go, keeping
+    //        track of the old targers.
+    //        If we found any equivalent transitions, look up new state from the targets of the equivalent transitions
+    //        and append a new transition to `transitions`, then remove the base transition
+    //        We fix the base transition index as we go.
     //  At the end, we have our new transitions and the automaton is deterministic
-    //    TODO: However, there may be unreachable states amoung the old states, we need to remove them
-    //    TODO: Remove unreachable states in minimize, but don't even check for dead states?
-    //    TODO: Is this the only thing that could happen? Maybe unreachable states among new_states and dead states?
+    //  Some of the states may now be unreachable so they are removed.
 
     var transitions = CtArrayList(Transition).fromSlice(self.transitions);
     var prev_end_idx: usize = 0;
@@ -916,55 +795,42 @@ pub fn determinize(comptime self: Self) Self {
         var base_transition_idx = transition_slice.start + transition_slice.len - 1;
         while (base_transition_idx > transition_slice.start) {
             const base_transition = transitions.items[base_transition_idx];
-            // Set up overlap state
-            var accumulated_overlap = base_transition.input;
+            // Track targets of equivalent transitions
             var old_targets = SortedList{ .items = &.{base_transition.target} };
 
-            // Find the maximum overlap between the base transition and the others
+            // Find and remove transitions with the same label as the base transition
             var transition_idx = base_transition_idx - 1;
             while (true) : (transition_idx -= 1) {
                 const curr_transition = &transitions.items[transition_idx];
 
-                if (accumulated_overlap.overlap(curr_transition.input)) |overlap| blk: {
-                    // Update overlap state
-                    accumulated_overlap = overlap;
+                if (base_transition.label == curr_transition.label) {
                     old_targets.append(curr_transition.target);
-                    // Remove overlap from curr_transition or remove curr_transition
-                    curr_transition.input = curr_transition.input.removeOverlap(overlap) orelse {
-                        // We don't need to manipulate transition_idx because we are looping backwards
-                        transitions.orderedRemove(transition_idx);
-                        transition_slice.len -= 1;
-                        // We removed a transition with an index less than the base transitions,
-                        //   move base transition index up to match this
-                        base_transition_idx -= 1;
-                        break :blk;
-                    };
+                    // We don't need to manipulate transition_idx because we are looping backwards
+                    transitions.orderedRemove(transition_idx);
+                    transition_slice.len -= 1;
+                    // We removed a transition with an index less than the base transitions,
+                    //   move base transition index up to match this
+                    base_transition_idx -= 1;
                 }
-
                 if (transition_idx == transition_slice.start) break;
             }
 
-            // Check if we accumulated any overlap
+            // Check if we removed any transitions
             if (old_targets.items.len > 1) {
                 // If we did, add our new transition to a combined state in our current transition_slice
+                // transition_slice stays the same because we add then remove a transition in the slice
                 transitions.insert(transition_slice.start + transition_slice.len, .{
                     .source = state,
                     .target = newStateIndex(&new_states, old_targets),
-                    .input = accumulated_overlap,
+                    .label = base_transition.label,
                 });
                 transition_slice.len += 1;
 
-                // Resolve base transition
-                transitions.items[base_transition_idx] = base_transition.input.removeOverlap(
-                    accumulated_overlap,
-                ) orelse {
-                    // We removed the base transition, our new base is at the same index
-                    transitions.orderedRemove(base_transition_idx);
-                    transition_slice.len -= 1;
-                    continue;
-                };
-                // We didn't remove the base transition, move index up
-                base_transition_idx -= 1;
+                // Remove base transition
+                // Base transition index stays the same since we removed the current base
+                transitions.orderedRemove(base_transition_idx);
+                transition_slice.len -= 1;
+                continue;
             }
             base_transition_idx -= 1;
         }
@@ -978,15 +844,77 @@ pub fn determinize(comptime self: Self) Self {
         }
     }
 
+    removeUnreachableStates(&transitions, &final_states);
+
     return .{
         .final_states = final_states.items,
         .transitions = transitions.items,
     };
 }
 
-// TODO: See if we can make all algorithms guarantee that
-//   1) their outputs contain no dead or unreachable states if their inputs don't
-//   2) their transitions are sorted and were so without std.sort.sort call
-// If 1 is not possible, we will need removeDeadStates and/or removeUnreachableStates and call it where needed
+fn removeUnreachableStates(
+    comptime transitions: *CtArrayList(Transition),
+    comptime final_states: *SortedList,
+) void {
+    var state_reachable = CtArrayList(bool).fromSlice(&.{true});
+    var max_state: usize = 0;
+    while (true) {
+        var new_reachable = false;
+        var t_idx: usize = 0;
+        while (t_idx < transitions.items.len) : (t_idx += 1) {
+            const t = transitions.items[t_idx];
 
-// TODO: assertNoDeadOrUnreachableStates()
+            if (t.source > max_state) max_state = t.source;
+            if (t.target > max_state) max_state = t.target;
+
+            if (max_state + 1 > state_reachable.items.len) {
+                const new_len = max_state + 1;
+                state_reachable.appendNTimes(false, new_len - state_reachable.items.len);
+            }
+
+            if (state_reachable.items[t.source] and !state_reachable.items[t.target]) {
+                state_reachable.items[t.target] = true;
+                new_reachable = true;
+            }
+        }
+        if (!new_reachable) break;
+    }
+
+    // Compute map from old to new states
+    const new_states = blk: {
+        var buf: [max_state + 1]usize = undefined;
+        var new_state: usize = 0;
+        for (state_reachable.items) |r, i| {
+            buf[i] = new_state;
+            if (r)
+                new_state += 1;
+        }
+        break :blk buf;
+    };
+
+    // Remove transitions and fix states at the same time
+    var t_idx: usize = 0;
+    while (t_idx < transitions.items.len) {
+        const t = &transitions.items[t_idx];
+
+        if (!state_reachable.items[t.source] or !state_reachable.items[t.target]) {
+            transitions.orderedRemove(t_idx);
+            continue;
+        }
+
+        t.source = new_states[t.source];
+        t.target = new_states[t.target];
+
+        t_idx += 1;
+    }
+
+    var new_final_states = SortedList{ .items = &.{} };
+    for (final_states.items) |fs| {
+        if (!state_reachable.items[fs]) continue;
+        new_final_states.append(new_states[fs]);
+    }
+    final_states.* = new_final_states;
+}
+
+// TODO Uses "Fast brief practical DFA minimization" by Valmari
+//  https://www.cs.cmu.edu/~cdm/papers/Valmari12.pdf

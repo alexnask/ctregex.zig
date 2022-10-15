@@ -215,14 +215,17 @@ pub fn MatchResult(
 
 // We deconstruct slices into this and cachedDeterminize to cache for
 // different slices with the same contents
-fn cachedAutomaton(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    // TODO: Minimize here? or minimize only after determinize?
+fn cachedNFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
     return comptime LL.parse(PcreGrammar, &pattern)[0];
 }
 
-fn cachedDeterminize(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    // TODO: Minimize here
-    return comptime LL.parse(PcreGrammar, &pattern)[0].determinize().minimize();
+fn cachedAutoFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    // TODO: Call cachedNFA, detect if we an make DFA
+    return cachedDFA(N, pattern);
+}
+
+fn cachedDFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    return comptime LL.parse(PcreGrammar, &pattern)[0].determinize();
 }
 
 pub fn match(
@@ -233,8 +236,12 @@ pub fn match(
     const Char = options.encoding.CharT();
 
     // TODO NFA engine and auto detection
+    const automaton = switch (options.engine) {
+        .auto => comptime cachedAutoFA(pattern.len, pattern[0..pattern.len].*),
+        .nfa => comptime cachedNFA(pattern.len, pattern[0..pattern.len].*),
+        .dfa => comptime cachedDFA(pattern.len, pattern[0..pattern.len].*),
+    };
     const engine = dfa;
-    const automaton = comptime cachedDeterminize(pattern.len, pattern[0..pattern.len].*);
 
     // If we can always just use the first character to check for a transition, do it
     const single_char = comptime automaton.singleCharBoundInEncoding(options.encoding);
@@ -253,9 +260,10 @@ pub fn match(
 }
 
 test "DFA match" {
-    @setEvalBranchQuota(2_000);
+    // With new unreachable state removal: 2_262 -> 2_170
+    @setEvalBranchQuota(2_170);
     comptime {
-        std.debug.assert(match(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)", "abaghi"));
+        std.debug.assert(match(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abaghi😊"));
         //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
     }
 

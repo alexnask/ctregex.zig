@@ -554,6 +554,15 @@ fn CtSortedList(comptime T: type) type {
             self.items = &[1]usize{elem} ++ self.items;
         }
 
+        fn replace(comptime self: *@This(), comptime idx: usize, comptime value: T) void {
+            if (idx == 0)
+                self.items = &[1]T{value} ++ self.items[1..]
+            else if (idx == self.items.len - 1)
+                self.items = self.items[0..idx] ++ &[1]T{value}
+            else
+                self.items = self.items[0..idx] ++ &[1]T{value} ++ self.items[idx + 1 ..];
+        }
+
         fn remove(comptime self: *@This(), comptime idx: usize) void {
             if (idx == self.items.len - 1)
                 self.items = self.items[0 .. self.items.len - 1]
@@ -677,8 +686,6 @@ fn newStateIndex(
 
 const SortedList = CtSortedList(usize);
 
-// TODO Prune stuff
-// TODO minimize function
 // TODO: Split into more files
 // TODO Thoroughly test this as well as the assumption about dead states
 
@@ -833,7 +840,7 @@ pub fn determinize(comptime self: Self) Self {
         }
     }
 
-    removeUnreachableStates(&transitions, &final_states);
+    minimize(&transitions, &final_states, new_states.len);
 
     return .{
         .final_states = final_states.items,
@@ -841,71 +848,7 @@ pub fn determinize(comptime self: Self) Self {
     };
 }
 
-fn removeUnreachableStates(
-    comptime transitions: *CtArrayList(Transition),
-    comptime final_states: *SortedList,
-) void {
-    var state_reachable = CtArrayList(bool).fromSlice(&.{true});
-    var max_state: usize = 0;
-    while (true) {
-        var new_reachable = false;
-        var t_idx: usize = 0;
-        while (t_idx < transitions.items.len) : (t_idx += 1) {
-            const t = transitions.items[t_idx];
-
-            if (t.source > max_state) max_state = t.source;
-            if (t.target > max_state) max_state = t.target;
-
-            if (max_state + 1 > state_reachable.items.len) {
-                const new_len = max_state + 1;
-                state_reachable.appendNTimes(false, new_len - state_reachable.items.len);
-            }
-
-            if (state_reachable.items[t.source] and !state_reachable.items[t.target]) {
-                state_reachable.items[t.target] = true;
-                new_reachable = true;
-            }
-        }
-        if (!new_reachable) break;
-    }
-
-    // Compute map from old to new states
-    const new_states = blk: {
-        var buf: [max_state + 1]usize = undefined;
-        var new_state: usize = 0;
-        for (state_reachable.items) |r, i| {
-            buf[i] = new_state;
-            if (r)
-                new_state += 1;
-        }
-        break :blk buf;
-    };
-
-    // Remove transitions and fix states at the same time
-    var t_idx: usize = 0;
-    while (t_idx < transitions.items.len) {
-        const t = &transitions.items[t_idx];
-
-        if (!state_reachable.items[t.source] or !state_reachable.items[t.target]) {
-            transitions.orderedRemove(t_idx);
-            continue;
-        }
-
-        t.source = new_states[t.source];
-        t.target = new_states[t.target];
-
-        t_idx += 1;
-    }
-
-    var new_final_states = SortedList{ .items = &.{} };
-    for (final_states.items) |fs| {
-        if (!state_reachable.items[fs]) continue;
-        new_final_states.append(new_states[fs]);
-    }
-    final_states.* = new_final_states;
-}
-
-// Dfa minimization (TODO: Does this work for NFAs?)
+// Dfa minimization
 // Ported "Fast brief practical DFA minimization" by Antti Valmari
 // See: https://www.cs.cmu.edu/~cdm/papers/Valmari12.pdf
 
@@ -1015,9 +958,7 @@ fn cmp(transitions: []const Transition, i: usize, j: usize) bool {
     return transitions[i].label < transitions[j].label;
 }
 
-// TODO: Rename params
 fn makeAdjacent(
-    // TODO: Instead of K, transitions + field_name to @field()
     transitions: []const Transition,
     comptime field: []const u8,
     A: [*]usize,
@@ -1040,55 +981,116 @@ fn makeAdjacent(
     }
 }
 
-pub fn minimize(comptime self: Self) Self {
+fn reach(
+    blocks: *Partition,
+    q: usize,
+    reached_states: *usize,
+) void {
+    const i = blocks.locations[q];
+    if (i >= reached_states.*) {
+        blocks.elements[i] = blocks.elements[reached_states.*];
+        blocks.locations[blocks.elements[i]] = i;
+        blocks.elements[reached_states.*] = q;
+        blocks.locations[q] = reached_states.*;
+        reached_states.* += 1;
+    }
+}
+
+fn removeUnreachable(
+    blocks: *Partition,
+    transitions: *[]Transition,
+    comptime T: []const u8,
+    comptime H: []const u8,
+    reached_states: *usize,
+    A: [*]usize,
+    F: []usize, // nn = F.len - 1
+) void {
+    makeAdjacent(transitions.*, T, A, F);
+    var i: usize = 0;
+    var j: usize = undefined;
+    while (i < reached_states.*) : (i += 1) {
+        j = F[blocks.elements[i]];
+        while (j < F[blocks.elements[i] + 1]) : (j += 1) {
+            reach(blocks, @field(transitions.*[A[j]], H), reached_states);
+        }
+    }
+
+    j = 0;
+    var t: usize = 0;
+    while (t < transitions.*.len) : (t += 1) {
+        if (blocks.locations[@field(transitions.*[t], T)] < reached_states.*) {
+            transitions.*[j] = transitions.*[t];
+            j += 1;
+        }
+    }
+    transitions.*.len = j;
+    blocks.past[0] = reached_states.*;
+    reached_states.* = 0;
+}
+fn minimize(
+    comptime transitions: *CtArrayList(Transition),
+    comptime final_states: *SortedList,
+    comptime initial_state_count: usize,
+) void {
     // nn = self.stateCount();
     // mm = self.transitions.items.len
-    // ff = nn (no unreachable states)
     // q0 = 0
     // T = transitions.items | @field($, "source")
     // H = transitions.items | @field($, "target")
     // L = transitions.items | @field($, "label")
 
-    const state_count = self.stateCount();
+    var reached_states: usize = 0;
+    // States partition
+    var blocks = Partition.init(initial_state_count);
 
     const F: []usize = blk: {
-        var buf: [state_count + 1]usize = undefined;
+        var buf: [initial_state_count + 1]usize = undefined;
         break :blk &buf;
     };
 
     const A: [*]usize = blk: {
-        var buf: [self.transitions.len]usize = undefined;
+        var buf: [transitions.items.len]usize = undefined;
         break :blk &buf;
     };
 
+    // We only run the forward pass to remove unreachable states, we know there are no dead states
+    reach(&blocks, 0, &reached_states);
+    removeUnreachable(
+        &blocks,
+        &transitions.items,
+        "source",
+        "target",
+        &reached_states,
+        A,
+        F,
+    );
+    const state_count = reached_states;
+
     var marked_elements: [*]usize = blk: {
-        var buf: [self.transitions.len + 1]usize = undefined;
+        var buf: [transitions.items.len + 1]usize = undefined;
         buf[0] = state_count;
         break :blk &buf;
     };
 
-    // States partition
-    var blocks = Partition.init(state_count);
-
     // Make initial transition partition
     var touched_sets: []usize = blk: {
-        var buf: [self.transitions.len + 1]usize = undefined;
+        var buf: [transitions.items.len + 1]usize = undefined;
         buf[0] = 0;
         break :blk buf[0..1];
     };
     blocks.split(marked_elements, &touched_sets);
 
-    var cords = Partition.init(self.transitions.len);
-    std.sort.sort(usize, cords.elements, self.transitions, cmp);
+    var cords = Partition.init(transitions.items.len);
+    std.sort.sort(usize, cords.elements, transitions.items, cmp);
 
     marked_elements[0] = 0;
     cords.partition_count = 0;
-    var a = self.transitions[cords.elements[0]].label;
+    var a = transitions.items[cords.elements[0]].label;
     var i: usize = 0;
-    while (i < self.transitions.len) : (i += 1) {
+    while (i < transitions.items.len) : (i += 1) {
         const t = cords.elements[i];
-        if (self.transitions[t].label != a) {
-            a = self.transitions[t].label;
+        if (transitions.items[t].label != a) {
+            a = transitions.items[t].label;
             cords.past[cords.partition_count] = i;
             cords.partition_count += 1;
             cords.first[cords.partition_count] = i;
@@ -1097,11 +1099,11 @@ pub fn minimize(comptime self: Self) Self {
         cords.set_of_elem[t] = cords.partition_count;
         cords.locations[t] = i;
     }
-    cords.past[cords.partition_count] = self.transitions.len;
+    cords.past[cords.partition_count] = transitions.items.len;
     cords.partition_count += 1;
 
     // Split blocks and cords
-    makeAdjacent(self.transitions, "target", A, F);
+    makeAdjacent(transitions.items, "target", A, F);
     var b: usize = 1;
     var c: usize = 0;
     var j: usize = undefined;
@@ -1109,7 +1111,7 @@ pub fn minimize(comptime self: Self) Self {
     while (c < cords.partition_count) {
         i = cords.first[c];
         while (i < cords.past[c]) : (i += 1)
-            blocks.mark(self.transitions[cords.elements[i]].source, marked_elements, &touched_sets);
+            blocks.mark(transitions.items[cords.elements[i]].source, marked_elements, &touched_sets);
 
         blocks.split(marked_elements, &touched_sets);
         c += 1;
@@ -1127,6 +1129,7 @@ pub fn minimize(comptime self: Self) Self {
 
     // If not zero, we will have to swap it with new state zero
     const new_start_state = blocks.set_of_elem[0];
+    // We use this to swap 0 and new_start_state if new_start_state != 0
     const new_state = struct {
         fn f(nss: usize, set_of_elem: []usize, old_state: usize) usize {
             const new = set_of_elem[old_state];
@@ -1135,18 +1138,22 @@ pub fn minimize(comptime self: Self) Self {
         }
     }.f;
 
-    // Construct new transitions
-    var transitions = CtArrayList(Transition).initCapacity(self.transitions.len / 2);
-    for (self.transitions) |t| {
-        if (blocks.locations[t.source] == blocks.first[blocks.set_of_elem[t.source]]) {
-            transitions.append(.{
-                .source = new_state(new_start_state, blocks.set_of_elem, t.source),
-                .target = new_state(new_start_state, blocks.set_of_elem, t.target),
-                .label = t.label,
-            });
+    var out_idx: usize = 0;
+    var t: usize = 0;
+    while (t < transitions.items.len) : (t += 1) {
+        const transition = &transitions.items[t];
+        if (blocks.locations[transition.source] ==
+            blocks.first[blocks.set_of_elem[transition.source]])
+        {
+            transition.source = new_state(new_start_state, blocks.set_of_elem, transition.source);
+            transition.target = new_state(new_start_state, blocks.set_of_elem, transition.target);
+            if (out_idx != t) {
+                transitions.items[out_idx] = transition.*;
+            }
+            out_idx += 1;
         }
     }
-
+    transitions.items = transitions.items[0..out_idx];
     std.sort.sort(
         Transition,
         transitions.items,
@@ -1154,17 +1161,18 @@ pub fn minimize(comptime self: Self) Self {
         transitionLessThan,
     );
 
-    // Construct new final states
-    var final_states = SortedList{ .items = &.{} };
-    for (self.final_states) |fs| {
-        if (blocks.first[fs] < state_count)
-            final_states.append(new_state(new_start_state, blocks.set_of_elem, fs));
+    var fs_idx: usize = 0;
+    while (fs_idx < final_states.items.len) {
+        const fs = final_states.items[fs_idx];
+        // Remove
+        if (blocks.first[fs] >= initial_state_count) {
+            final_states.remove(fs_idx);
+            continue;
+        }
+        const new_fs = new_state(new_start_state, blocks.set_of_elem, fs);
+        final_states.replace(fs_idx, new_fs);
+        fs_idx += 1;
     }
-
-    return .{
-        .transitions = transitions.items,
-        .final_states = final_states.items,
-    };
 }
 
 // Used for debug purposes

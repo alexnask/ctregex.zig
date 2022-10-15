@@ -687,16 +687,14 @@ const TransitionSlice = struct {
     len: usize,
 };
 
-// TODO: Check this
 /// Returns number of copied transitions
-fn appendFromSources(
+fn appendFromSourcesFixSource(
     comptime transitions: *CtArrayList(Transition),
     comptime sources: SortedList,
+    comptime source: usize,
 ) usize {
     var inserted: usize = 0;
-
     const max_source = sources.items[sources.items.len - 1];
-
     var curr_source_idx: usize = 0;
     for (transitions.items) |t, t_idx| {
         const curr_source = sources.items[curr_source_idx];
@@ -709,16 +707,17 @@ fn appendFromSources(
             {}
 
             const len = curr - start_idx;
-            if (len == 1) {
-                transitions.append(t);
-            } else {
-                transitions.appendSlice(transitions.items[start_idx..curr]);
+            for (transitions.items[start_idx..curr]) |t2| {
+                transitions.append(.{
+                    .source = source,
+                    .target = t2.target,
+                    .label = t2.label,
+                });
             }
             inserted += len;
             curr_source_idx += 1;
-        } else if (t.source > curr_source) {
+        } else if (t.source > curr_source)
             curr_source_idx += 1;
-        }
 
         if (curr_source_idx >= sources.items.len or t.source > max_source) break;
     }
@@ -739,7 +738,7 @@ pub fn determinize(comptime self: Self) Self {
 
     // The procedure to determinize `self` is the following:
     //   Keep a new_state -> {old_states...} map
-    //    Initialize it with old_state -> {old_state}
+    //    Initialize it with forall old_state -> {old_state}
     //  For each new_state:
     //    If an old_state, find slice of transitions in `transitions`
     //    If a new_state, insert transitions from each old state, find resulting slice
@@ -747,11 +746,11 @@ pub fn determinize(comptime self: Self) Self {
     //      If transition_slice.len < 2, continue
     //      Start with base transition = transition_slice[-1]
     //      We will iteratively do the following as long as we have a base transition and at least one more transition:
-    //        Find transitions with the same label as base_transition, removing equivalent transitions as we go, keeping
-    //        track of the old targers.
-    //        If we found any equivalent transitions, look up new state from the targets of the equivalent transitions
+    //        Find transitions with the same label as base_transition and remove them, keeping
+    //        track of their targets.
+    //        If we removed any transition, look up new state from the transition targets we built up
     //        and append a new transition to `transitions`, then remove the base transition
-    //        We fix the base transition index as we go.
+    //        We fix the base transition index as we go to always end up at the next transition.
     //  At the end, we have our new transitions and the automaton is deterministic
     //  Some of the states may now be unreachable so they are removed.
 
@@ -774,14 +773,7 @@ pub fn determinize(comptime self: Self) Self {
             // New state, construct the transition slice by inserting at `prev_end_idx + 1`
             // We copy here and not when creating the new transition to get the already reduced transitions
             //   from previous states
-            const start_source_fix = prev_end_idx;
-            const inserted = appendFromSources(
-                &transitions,
-                new_states[state],
-            );
-            // Fix transition sources
-            for (transitions.items[start_source_fix..][0..inserted]) |*t|
-                t.source = state;
+            const inserted = appendFromSourcesFixSource(&transitions, new_states[state], state);
             break :blk .{ .start = prev_end_idx, .len = inserted };
         };
         defer prev_end_idx = transition_slice.start + transition_slice.len;
@@ -823,12 +815,10 @@ pub fn determinize(comptime self: Self) Self {
                     .target = newStateIndex(&new_states, old_targets),
                     .label = base_transition.label,
                 });
-                transition_slice.len += 1;
 
                 // Remove base transition
                 // Base transition index stays the same since we removed the current base
                 transitions.orderedRemove(base_transition_idx);
-                transition_slice.len -= 1;
                 continue;
             }
             base_transition_idx -= 1;
@@ -915,5 +905,295 @@ fn removeUnreachableStates(
     final_states.* = new_final_states;
 }
 
-// TODO Uses "Fast brief practical DFA minimization" by Antti Valmari
-//  https://www.cs.cmu.edu/~cdm/papers/Valmari12.pdf
+// Dfa minimization (TODO: Does this work for NFAs?)
+// Ported "Fast brief practical DFA minimization" by Antti Valmari
+// See: https://www.cs.cmu.edu/~cdm/papers/Valmari12.pdf
+
+// We will create one partition for states and one for transitions
+const Partition = struct {
+    const Array = []usize;
+    partition_count: usize, // `z`
+    elements: Array, // `E`
+    first: Array, // `F`
+    past: Array, // `P`
+    locations: Array, // 'L'
+    set_of_elem: Array, // `S`
+
+    fn init(comptime n: usize) Partition {
+        var self: Partition = undefined;
+        self.partition_count = @boolToInt(n != 0);
+
+        var index_init: [n]usize = undefined;
+        for (index_init) |*e, i| e.* = i;
+
+        self.elements = blk: {
+            var buf = index_init;
+            break :blk &buf;
+        };
+        self.locations = blk: {
+            var buf = index_init;
+            break :blk &buf;
+        };
+        self.set_of_elem = blk: {
+            var buf = std.mem.zeroes([n]usize);
+            break :blk &buf;
+        };
+
+        if (n != 0) {
+            self.first = blk: {
+                var buf = std.mem.zeroes([n]usize);
+                break :blk &buf;
+            };
+            self.past = blk: {
+                var buf = [1]usize{n} ** n;
+                break :blk &buf;
+            };
+        }
+
+        return self;
+    }
+
+    fn mark(
+        self: *Partition,
+        e: usize,
+        marked_elements: [*]usize, // M
+        touched_sets: *[]usize, // W + w
+    ) void {
+        const s = self.set_of_elem[e];
+        const i = self.locations[e];
+        const j = self.first[s] + marked_elements[s];
+        self.elements[i] = self.elements[j];
+        self.locations[self.elements[i]] = i;
+        self.elements[j] = e;
+        self.locations[e] = j;
+
+        const marked = marked_elements[s] != 0;
+        marked_elements[s] += 1;
+        if (!marked) {
+            touched_sets.*.len += 1;
+            touched_sets.*[touched_sets.*.len - 1] = s;
+        }
+    }
+
+    fn split(
+        self: *Partition,
+        marked_elements: [*]usize, // M
+        touched_sets: *[]usize, // W + w
+    ) void {
+        while (touched_sets.len > 0) {
+            const s = touched_sets.*[touched_sets.*.len - 1];
+            touched_sets.*.len -= 1;
+            const j = self.first[s] + marked_elements[s];
+
+            if (j == self.past[s]) {
+                marked_elements[s] = 0;
+                continue;
+            }
+
+            if (marked_elements[s] <= self.past[s] - j) {
+                self.first[self.partition_count] = self.first[s];
+                self.past[self.partition_count] = j;
+                self.first[s] = j;
+            } else {
+                self.past[self.partition_count] = self.past[s];
+                self.first[self.partition_count] = j;
+                self.past[s] = j;
+            }
+
+            var i: usize = self.first[self.partition_count];
+            while (i < self.past[self.partition_count]) : (i += 1) {
+                self.set_of_elem[self.elements[i]] = self.partition_count;
+            }
+            marked_elements[s] = 0;
+            marked_elements[self.partition_count] = 0;
+            self.partition_count += 1;
+        }
+    }
+};
+
+fn cmp(transitions: []const Transition, i: usize, j: usize) bool {
+    return transitions[i].label < transitions[j].label;
+}
+
+// TODO: Rename params
+fn makeAdjacent(
+    // TODO: Instead of K, transitions + field_name to @field()
+    transitions: []const Transition,
+    comptime field: []const u8,
+    A: [*]usize,
+    F: []usize, // nn = F.len - 1
+) void {
+    var q: usize = 0;
+    var t: usize = 0;
+    while (q <= F.len - 1) : (q += 1)
+        F[q] = 0;
+    while (t < transitions.len) : (t += 1)
+        F[@field(transitions[t], field)] += 1;
+    q = 0;
+    while (q < F.len - 1) : (q += 1)
+        F[q + 1] += F[q];
+    t = transitions.len;
+    while (t != 0) {
+        t -= 1;
+        F[@field(transitions[t], field)] -= 1;
+        A[F[@field(transitions[t], field)]] = t;
+    }
+}
+
+pub fn minimize(comptime self: Self) Self {
+    // nn = self.stateCount();
+    // mm = self.transitions.items.len
+    // ff = nn (no unreachable states)
+    // q0 = 0
+    // T = transitions.items | @field($, "source")
+    // H = transitions.items | @field($, "target")
+    // L = transitions.items | @field($, "label")
+
+    const state_count = self.stateCount();
+
+    const F: []usize = blk: {
+        var buf: [state_count + 1]usize = undefined;
+        break :blk &buf;
+    };
+
+    const A: [*]usize = blk: {
+        var buf: [self.transitions.len]usize = undefined;
+        break :blk &buf;
+    };
+
+    var marked_elements: [*]usize = blk: {
+        var buf: [self.transitions.len + 1]usize = undefined;
+        buf[0] = state_count;
+        break :blk &buf;
+    };
+
+    // States partition
+    var blocks = Partition.init(state_count);
+
+    // Make initial transition partition
+    var touched_sets: []usize = blk: {
+        var buf: [self.transitions.len + 1]usize = undefined;
+        buf[0] = 0;
+        break :blk buf[0..1];
+    };
+    blocks.split(marked_elements, &touched_sets);
+
+    var cords = Partition.init(self.transitions.len);
+    std.sort.sort(usize, cords.elements, self.transitions, cmp);
+
+    marked_elements[0] = 0;
+    cords.partition_count = 0;
+    var a = self.transitions[cords.elements[0]].label;
+    var i: usize = 0;
+    while (i < self.transitions.len) : (i += 1) {
+        const t = cords.elements[i];
+        if (self.transitions[t].label != a) {
+            a = self.transitions[t].label;
+            cords.past[cords.partition_count] = i;
+            cords.partition_count += 1;
+            cords.first[cords.partition_count] = i;
+            marked_elements[cords.partition_count] = 0;
+        }
+        cords.set_of_elem[t] = cords.partition_count;
+        cords.locations[t] = i;
+    }
+    cords.past[cords.partition_count] = self.transitions.len;
+    cords.partition_count += 1;
+
+    // Split blocks and cords
+    makeAdjacent(self.transitions, "target", A, F);
+    var b: usize = 1;
+    var c: usize = 0;
+    var j: usize = undefined;
+
+    while (c < cords.partition_count) {
+        i = cords.first[c];
+        while (i < cords.past[c]) : (i += 1)
+            blocks.mark(self.transitions[cords.elements[i]].source, marked_elements, &touched_sets);
+
+        blocks.split(marked_elements, &touched_sets);
+        c += 1;
+        while (b < blocks.partition_count) {
+            i = blocks.first[b];
+            while (i < blocks.past[b]) : (i += 1) {
+                j = F[blocks.elements[i]];
+                while (j < F[blocks.elements[i] + 1]) : (j += 1)
+                    cords.mark(A[j], marked_elements, &touched_sets);
+            }
+            cords.split(marked_elements, &touched_sets);
+            b += 1;
+        }
+    }
+
+    // If not zero, we will have to swap it with new state zero
+    const new_start_state = blocks.set_of_elem[0];
+    const new_state = struct {
+        fn f(nss: usize, set_of_elem: []usize, old_state: usize) usize {
+            const new = set_of_elem[old_state];
+            if (nss == 0) return new;
+            return if (new == nss) 0 else if (new == 0) nss else new;
+        }
+    }.f;
+
+    // Construct new transitions
+    var transitions = CtArrayList(Transition).initCapacity(self.transitions.len / 2);
+    for (self.transitions) |t| {
+        if (blocks.locations[t.source] == blocks.first[blocks.set_of_elem[t.source]]) {
+            transitions.append(.{
+                .source = new_state(new_start_state, blocks.set_of_elem, t.source),
+                .target = new_state(new_start_state, blocks.set_of_elem, t.target),
+                .label = t.label,
+            });
+        }
+    }
+
+    std.sort.sort(
+        Transition,
+        transitions.items,
+        {},
+        transitionLessThan,
+    );
+
+    // Construct new final states
+    var final_states = SortedList{ .items = &.{} };
+    for (self.final_states) |fs| {
+        if (blocks.first[fs] < state_count)
+            final_states.append(new_state(new_start_state, blocks.set_of_elem, fs));
+    }
+
+    return .{
+        .transitions = transitions.items,
+        .final_states = final_states.items,
+    };
+}
+
+// Used for debug purposes
+pub fn printDotFile(comptime self: Self) void {
+    var str: []const u8 =
+        \\
+        \\digraph fsm {
+        \\    rankdir=LR;
+        \\    node [shape = doublecircle];
+    ;
+
+    for (self.final_states) |fs| {
+        var buf: [5]u8 = undefined;
+        const res = std.fmt.bufPrint(&buf, " {d}", .{fs}) catch unreachable;
+        str = str ++ res;
+    }
+    str = str ++
+        \\;
+        \\    node [shape = circle];
+    ;
+
+    for (self.transitions) |t| {
+        var buf: [64]u8 = undefined;
+        str = str ++ (std.fmt.bufPrint(
+            &buf,
+            "\n    {d} -> {d} [label = \"{s}\"];",
+            .{ t.source, t.target, ctUtf8EncodeChar(t.label) },
+        ) catch unreachable);
+    }
+    str = "\n" ++ str ++ "\n}";
+    @compileError(str);
+}

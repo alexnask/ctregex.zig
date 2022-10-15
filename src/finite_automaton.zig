@@ -923,7 +923,7 @@ const Partition = struct {
         marked_elements: [*]usize, // M
         touched_sets: *[]usize, // W + w
     ) void {
-        while (touched_sets.len > 0) {
+        while (touched_sets.*.len > 0) {
             const s = touched_sets.*[touched_sets.*.len - 1];
             touched_sets.*.len -= 1;
             const j = self.first[s] + marked_elements[s];
@@ -1067,8 +1067,7 @@ fn minimize(
     const state_count = reached_states;
 
     var marked_elements: [*]usize = blk: {
-        var buf: [transitions.items.len + 1]usize = undefined;
-        buf[0] = state_count;
+        var buf = [1]usize{state_count} ++ [1]usize{0} ** transitions.items.len;
         break :blk &buf;
     };
 
@@ -1153,13 +1152,10 @@ fn minimize(
             out_idx += 1;
         }
     }
+
     transitions.items = transitions.items[0..out_idx];
-    std.sort.sort(
-        Transition,
-        transitions.items,
-        {},
-        transitionLessThan,
-    );
+    // The transactions are no longer sorted by source but we don't care since
+    // we are going straight to match codegen or comptime matching next
 
     var fs_idx: usize = 0;
     while (fs_idx < final_states.items.len) {

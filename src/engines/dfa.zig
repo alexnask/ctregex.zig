@@ -4,6 +4,7 @@ const root = @import("../ctregex.zig");
 const unicode = @import("../unicode.zig");
 const FiniteAutomaton = @import("../finite_automaton.zig");
 
+const Operation = root.Operation;
 const NextChar = root.NextChar;
 const Encoding = root.Encoding;
 const MatchOptions = root.MatchOptions;
@@ -29,9 +30,9 @@ inline fn nextChar(
             if (length == 1) return input[input_idx.*];
             if (input_idx.* + length > input.len) return error.DecodeError;
             return switch (length) {
-                2 => std.unicode.utf8Decode2(input[input_idx.*..]) catch return error.DecodeError,
-                3 => std.unicode.utf8Decode3(input[input_idx.*..]) catch return error.DecodeError,
-                4 => std.unicode.utf8Decode4(input[input_idx.*..]) catch return error.DecodeError,
+                2 => std.unicode.utf8Decode2(input[input_idx.*..][0..2]) catch return error.DecodeError,
+                3 => std.unicode.utf8Decode3(input[input_idx.*..][0..3]) catch return error.DecodeError,
+                4 => std.unicode.utf8Decode4(input[input_idx.*..][0..4]) catch return error.DecodeError,
                 else => unreachable,
             };
         },
@@ -48,6 +49,7 @@ inline fn nextChar(
 pub inline fn matchSlice(
     comptime options: MatchOptions,
     comptime automaton: FiniteAutomaton,
+    comptime operation: Operation,
     comptime single_char: bool,
     input: []const options.encoding.CharT(),
 ) MatchError(
@@ -63,6 +65,15 @@ pub inline fn matchSlice(
     var state: std.math.IntFittingRange(0, automaton.stateCount() - 1) = 0;
     var input_idx: usize = 0;
     matching: while (input_idx < input.len) {
+        switch (operation) {
+            .match => {},
+            .starts_with => {
+                inline for (automaton.final_states) |fs| {
+                    if (state == fs) return true;
+                }
+            },
+        }
+
         const char = nextChar(
             options.encoding,
             single_char,
@@ -98,11 +109,16 @@ pub inline fn matchSlice(
         return false;
     }
 
-    // We are now at the end of the stream, check if we are in a final state
-    inline for (automaton.final_states) |fs| {
-        if (fs == state) return true;
+    switch (operation) {
+        .match => {
+            // We are now at the end of the stream, check if we are in a final state
+            inline for (automaton.final_states) |fs| {
+                if (fs == state) return true;
+            }
+            return false;
+        },
+        .starts_with => return false,
     }
-    return false;
 }
 
 inline fn readNextChar(
@@ -124,6 +140,7 @@ inline fn readNextChar(
 pub inline fn matchReader(
     comptime options: MatchOptions,
     comptime automaton: FiniteAutomaton,
+    comptime operation: Operation,
     comptime single_char: bool,
     reader: anytype,
 ) MatchError(
@@ -138,6 +155,12 @@ pub inline fn matchReader(
 
     var state: std.math.IntFittingRange(0, automaton.stateCount() - 1) = 0;
     matching: while (true) {
+        if (operation == .starts_with) {
+            inline for (automaton.final_states) |fs| {
+                if (state == fs) return true;
+            }
+        }
+
         const char = readNextChar(
             options.encoding,
             single_char,
@@ -146,8 +169,10 @@ pub inline fn matchReader(
         ) catch |err| {
             // We use if-else here and not switch because the error set depends on options
             if (err == error.EndOfStream) {
-                inline for (automaton.final_states) |fs| {
-                    if (fs == state) return true;
+                if (operation == .match) {
+                    inline for (automaton.final_states) |fs| {
+                        if (fs == state) return true;
+                    }
                 }
                 return false;
             } else if (err == error.DecodeError) {

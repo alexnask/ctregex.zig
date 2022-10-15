@@ -36,7 +36,7 @@ pub const Encoding = enum {
         comptime encoding: Encoding,
         reader: anytype,
         c: encoding.CharT(),
-    ) !(if (encoding == .ascii) u8 else u21) {
+    ) !u21 {
         switch (encoding) {
             .ascii => return c,
             .utf8 => {
@@ -92,9 +92,9 @@ pub const Encoding = enum {
     pub inline fn readCodepoint(
         comptime encoding: Encoding,
         reader: anytype,
-    ) !(if (encoding == .ascii) u8 else u21) {
+    ) !u21 {
         switch (encoding) {
-            .ascii => return try reader.readByte(),
+            .ascii, .codepoint => unreachable,
             .utf8 => {
                 const c0 = try reader.readByte();
                 return try encoding.readCodepointWithFirstChar(reader, c0);
@@ -103,7 +103,6 @@ pub const Encoding = enum {
                 const c0 = try reader.readIntLittle(u16);
                 return try encoding.readCodepointWithFirstChar(reader, c0);
             },
-            .codepoint => return reader.readIntNative(u21),
         }
     }
 };

@@ -117,24 +117,6 @@ const PcreGrammar = struct {
     }
 };
 
-pub const Engine = enum {
-    /// dfa if no captures (/backreferences), nfa otherwise
-    auto,
-    dfa,
-    nfa,
-};
-
-pub const DecodeErrorMode = enum {
-    @"error",
-    fail,
-};
-
-pub const MatchOptions = struct {
-    engine: Engine = .auto,
-    encoding: Encoding = .ascii,
-    decodeErrorMode: DecodeErrorMode = .fail,
-};
-
 // Return type of nextChar.* engine functions
 pub fn NextChar(
     comptime encoding: Encoding,
@@ -184,6 +166,21 @@ fn inputKind(comptime encoding: Encoding, comptime Input: type) InputKind {
     }
 }
 
+// We deconstruct slices into this and cachedDeterminize to cache for
+// different slices with the same contents
+fn cachedNFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    return comptime LL.parse(PcreGrammar, &pattern)[0];
+}
+
+fn cachedAutoFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    // TODO: Call cachedNFA, detect if we an make DFA
+    return comptime cachedDFA(N, pattern);
+}
+
+fn cachedDFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    return comptime LL.parse(PcreGrammar, &pattern)[0].determinize();
+}
+
 pub fn MatchError(
     comptime encoding: Encoding,
     comptime decodeErrorMode: DecodeErrorMode,
@@ -213,33 +210,43 @@ pub fn MatchResult(
     std.debug.todo("NFA engine, determine when to use NFA in .auto");
 }
 
-// We deconstruct slices into this and cachedDeterminize to cache for
-// different slices with the same contents
-fn cachedNFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    return comptime LL.parse(PcreGrammar, &pattern)[0];
-}
+pub const Engine = enum {
+    /// dfa if no captures (/backreferences), nfa otherwise
+    auto,
+    dfa,
+    nfa,
+};
 
-fn cachedAutoFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    // TODO: Call cachedNFA, detect if we an make DFA
-    return cachedDFA(N, pattern);
-}
+pub const DecodeErrorMode = enum {
+    @"error",
+    fail,
+};
 
-fn cachedDFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    return comptime LL.parse(PcreGrammar, &pattern)[0].determinize();
-}
+pub const MatchOptions = struct {
+    engine: Engine = .auto,
+    encoding: Encoding = .ascii,
+    decodeErrorMode: DecodeErrorMode = .fail,
+};
 
-pub fn match(
+pub const Operation = enum {
+    match,
+    starts_with,
+};
+
+inline fn matchInner(
     comptime options: MatchOptions,
-    comptime pattern: [:0]const u8,
+    comptime N: usize,
+    comptime pattern: [N:0]u8,
+    comptime operation: Operation,
     input: anytype,
-) MatchResult(options, pattern, @TypeOf(input)) {
+) MatchResult(options, &pattern, @TypeOf(input)) {
     const Char = options.encoding.CharT();
 
     // TODO NFA engine and auto detection
     const automaton = switch (options.engine) {
-        .auto => comptime cachedAutoFA(pattern.len, pattern[0..pattern.len].*),
-        .nfa => comptime cachedNFA(pattern.len, pattern[0..pattern.len].*),
-        .dfa => comptime cachedDFA(pattern.len, pattern[0..pattern.len].*),
+        .auto => comptime cachedAutoFA(pattern.len, pattern[0..].*),
+        .nfa => comptime cachedNFA(pattern.len, pattern[0..].*),
+        .dfa => comptime cachedDFA(pattern.len, pattern[0..].*),
     };
     const engine = dfa;
 
@@ -250,26 +257,59 @@ pub fn match(
 
     // Switch to correct engine function
     switch (comptime inputKind(options.encoding, @TypeOf(input))) {
-        .reader => return try engine.matchReader(options, automaton, single_char, input),
-        .char_slice => return try engine.matchSlice(options, automaton, single_char, @as([]const Char, input)),
+        .reader => return try engine.matchReader(
+            options,
+            automaton,
+            operation,
+            single_char,
+            input,
+        ),
+        .char_slice => return try engine.matchSlice(
+            options,
+            automaton,
+            operation,
+            single_char,
+            @as([]const Char, input),
+        ),
         .byte_slice => {
             var fbs = std.io.fixedBufferStream(@as([]const u8, input));
-            return try engine.matchReader(options, automaton, single_char, fbs.reader());
+            return try engine.matchReader(
+                options,
+                automaton,
+                operation,
+                single_char,
+                fbs.reader(),
+            );
         },
     }
 }
 
+pub fn match(
+    comptime options: MatchOptions,
+    comptime pattern: [:0]const u8,
+    input: anytype,
+) MatchResult(options, pattern, @TypeOf(input)) {
+    return matchInner(options, pattern.len, pattern[0..].*, .match, input);
+}
+
+pub fn startsWith(
+    comptime options: MatchOptions,
+    comptime pattern: [:0]const u8,
+    input: anytype,
+) MatchResult(options, pattern, @TypeOf(input)) {
+    return matchInner(options, pattern.len, pattern[0..].*, .starts_with, input);
+}
+
 test "DFA match" {
-    // With new unreachable state removal: 2_262 -> 2_170
-    @setEvalBranchQuota(2_170);
+    @setEvalBranchQuota(2_100);
     comptime {
-        std.debug.assert(match(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abaghi😊"));
+        //std.debug.assert(startsWith(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abaghi😊erreftrefe"));
         //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
     }
 
     //try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", "abdefé"));
-    //var fbs = std.io.fixedBufferStream("abdefé");
-    //try std.testing.expect(try match(.{}, "ab(def)*é|aghi|abz", fbs.reader()));
+    var fbs = std.io.fixedBufferStream("abdefé");
+    try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
 }
 // TODO Reorganize files, only keep public interface in this file
 //   Flesh out structure of things, add `std.debug.todo`s

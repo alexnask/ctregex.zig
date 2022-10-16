@@ -109,16 +109,10 @@ pub inline fn matchSlice(
         return false;
     }
 
-    switch (operation) {
-        .match => {
-            // We are now at the end of the stream, check if we are in a final state
-            inline for (automaton.final_states) |fs| {
-                if (fs == state) return true;
-            }
-            return false;
-        },
-        .starts_with => return false,
+    inline for (automaton.final_states) |fs| {
+        if (fs == state) return true;
     }
+    return false;
 }
 
 inline fn readNextChar(

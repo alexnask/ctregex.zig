@@ -248,6 +248,7 @@ inline fn matchInner(
         .nfa => comptime cachedNFA(pattern.len, pattern[0..].*),
         .dfa => comptime cachedDFA(pattern.len, pattern[0..].*),
     };
+
     const engine = dfa;
 
     // If we can always just use the first character to check for a transition, do it
@@ -301,13 +302,11 @@ pub fn startsWith(
 }
 
 test "DFA match" {
-    @setEvalBranchQuota(2_100);
+    @setEvalBranchQuota(2_300);
     comptime {
-        //std.debug.assert(startsWith(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abaghi😊erreftrefe"));
-        //std.debug.assert(try match(.{}, "ab(def)*é|aghi|abz", "abdefé"));
+        std.debug.assert(startsWith(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abdeffffffffé😊yoyo"));
     }
 
-    //try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", "abdefé"));
     var fbs = std.io.fixedBufferStream("abdefé");
     try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
 }

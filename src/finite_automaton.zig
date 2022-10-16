@@ -862,7 +862,9 @@ const Partition = struct {
     locations: Array, // 'L'
     set_of_elem: Array, // `S`
 
-    fn init(comptime n: usize) Partition {
+    // The second argument is used to make sure we don't get a cached Partition
+    // with initialized memory
+    fn init(comptime n: usize, comptime _: type) Partition {
         var self: Partition = undefined;
         self.partition_count = @boolToInt(n != 0);
 
@@ -1025,7 +1027,6 @@ fn removeUnreachable(
     }
     transitions.*.len = j;
     blocks.past[0] = reached_states.*;
-    reached_states.* = 0;
 }
 fn minimize(
     comptime transitions: *CtArrayList(Transition),
@@ -1041,7 +1042,7 @@ fn minimize(
 
     var reached_states: usize = 0;
     // States partition
-    var blocks = Partition.init(initial_state_count);
+    var blocks = Partition.init(initial_state_count, opaque {});
 
     const F: []usize = blk: {
         var buf: [initial_state_count + 1]usize = undefined;
@@ -1064,10 +1065,19 @@ fn minimize(
         A,
         F,
     );
-    const state_count = reached_states;
+    //const state_count = reached_states;
+    const final_state_count = blk: {
+        var res: usize = 0;
+        for (final_states.items) |fs| {
+            if (blocks.locations[fs] < blocks.past[0])
+                res += 1;
+        }
+        break :blk res;
+    };
 
     var marked_elements: [*]usize = blk: {
-        var buf = [1]usize{state_count} ++ [1]usize{0} ** transitions.items.len;
+        var buf: [transitions.items.len + 1]usize = undefined;
+        buf[0] = final_state_count;
         break :blk &buf;
     };
 
@@ -1079,7 +1089,7 @@ fn minimize(
     };
     blocks.split(marked_elements, &touched_sets);
 
-    var cords = Partition.init(transitions.items.len);
+    var cords = Partition.init(transitions.items.len, opaque {});
     std.sort.sort(usize, cords.elements, transitions.items, cmp);
 
     marked_elements[0] = 0;
@@ -1157,18 +1167,13 @@ fn minimize(
     // The transactions are no longer sorted by source but we don't care since
     // we are going straight to match codegen or comptime matching next
 
-    var fs_idx: usize = 0;
-    while (fs_idx < final_states.items.len) {
-        const fs = final_states.items[fs_idx];
-        // Remove
-        if (blocks.first[fs] >= initial_state_count) {
-            final_states.remove(fs_idx);
-            continue;
+    var new_final_states = SortedList{ .items = &.{} };
+    for (final_states.items) |fs| {
+        if (blocks.first[fs] < initial_state_count) {
+            new_final_states.append(new_state(new_start_state, blocks.set_of_elem, fs));
         }
-        const new_fs = new_state(new_start_state, blocks.set_of_elem, fs);
-        final_states.replace(fs_idx, new_fs);
-        fs_idx += 1;
     }
+    final_states.* = new_final_states;
 }
 
 // Used for debug purposes

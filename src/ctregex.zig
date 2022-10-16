@@ -2,7 +2,8 @@ const std = @import("std");
 const dfa = @import("engines/dfa.zig");
 const unicode = @import("unicode.zig");
 const LL = @import("ll.zig");
-const FiniteAutomaton = @import("finite_automaton.zig");
+const FiniteAutomaton = @import("fa/finite_automaton.zig");
+const determinize = @import("fa/determinize.zig").determinize;
 
 const ctUtf8EncodeChar = unicode.ctUtf8EncodeChar;
 pub const Encoding = unicode.Encoding;
@@ -133,6 +134,7 @@ pub fn NextChar(
 
 const InputKind = enum {
     reader,
+    char_slice_zero_term,
     char_slice,
     byte_slice,
 };
@@ -143,22 +145,27 @@ fn inputKind(comptime encoding: Encoding, comptime Input: type) InputKind {
 
     const Char = encoding.CharT();
     const child = type_info.Pointer.child;
+    const zero_terminated = if (std.meta.sentinel(Input)) |s| s == 0 else false;
+
     switch (type_info.Pointer.size) {
         .Slice => if (child != Char) {
             if (child == u8) return .byte_slice;
 
             @compileError("Expected input of type []const " ++ @typeName(Char) ++ ", got " ++
                 @typeName(Input));
-        } else return .char_slice,
+        } else return if (zero_terminated) .char_slice_zero_term else .char_slice,
         .One => {
             const child_type_info = @typeInfo(child);
             return switch (child_type_info) {
-                .Array => |arr| if (arr.child != Char) {
-                    if (arr.child == u8) return .byte_slice;
+                .Array => |arr| {
+                    const child_zero_terminated = if (std.meta.sentinel(child)) |s| s == 0 else false;
+                    if (arr.child != Char) {
+                        if (arr.child == u8) return .byte_slice;
 
-                    @compileError("Expected input of type *const [N]" ++ @typeName(Char) ++
-                        ", got " ++ @typeName(Input));
-                } else .char_slice,
+                        @compileError("Expected input of type *const [N]" ++ @typeName(Char) ++
+                            ", got " ++ @typeName(Input));
+                    } else return if (child_zero_terminated) .char_slice_zero_term else .char_slice;
+                },
                 else => .reader,
             };
         },
@@ -166,10 +173,15 @@ fn inputKind(comptime encoding: Encoding, comptime Input: type) InputKind {
     }
 }
 
+// TODO: Rewrite an AST eventually
+fn cachedAST(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
+    return comptime LL.parse(PcreGrammar, &pattern)[0];
+}
+
 // We deconstruct slices into this and cachedDeterminize to cache for
 // different slices with the same contents
 fn cachedNFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    return comptime LL.parse(PcreGrammar, &pattern)[0];
+    return cachedAST(N, pattern);
 }
 
 fn cachedAutoFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
@@ -178,7 +190,7 @@ fn cachedAutoFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
 }
 
 fn cachedDFA(comptime N: usize, comptime pattern: [N:0]u8) FiniteAutomaton {
-    return comptime LL.parse(PcreGrammar, &pattern)[0].determinize();
+    return comptime determinize(cachedAST(N, pattern));
 }
 
 pub fn MatchError(
@@ -244,9 +256,9 @@ inline fn matchInner(
 
     // TODO NFA engine and auto detection
     const automaton = switch (options.engine) {
-        .auto => comptime cachedAutoFA(pattern.len, pattern[0..].*),
-        .nfa => comptime cachedNFA(pattern.len, pattern[0..].*),
-        .dfa => comptime cachedDFA(pattern.len, pattern[0..].*),
+        .auto => comptime cachedAutoFA(N, pattern),
+        .nfa => comptime cachedNFA(N, pattern),
+        .dfa => comptime cachedDFA(N, pattern),
     };
 
     const engine = dfa;
@@ -256,8 +268,17 @@ inline fn matchInner(
     if (options.encoding == .ascii and !single_char)
         @compileError("Found non ascii characters in regex while in .ascii mode");
 
+    const input_kind = comptime inputKind(options.encoding, @TypeOf(input));
+    if (input_kind == .char_slice_zero_term) comptime {
+        const zero_label = for (automaton.transitions) |t| {
+            if (t.label == 0) break true;
+        } else false;
+        if (zero_label)
+            @compileError("Pattern contains a NUL character but input is a NUL terminated indexable");
+    };
+
     // Switch to correct engine function
-    switch (comptime inputKind(options.encoding, @TypeOf(input))) {
+    switch (input_kind) {
         .reader => return try engine.matchReader(
             options,
             automaton,
@@ -265,12 +286,16 @@ inline fn matchInner(
             single_char,
             input,
         ),
-        .char_slice => return try engine.matchSlice(
+        .char_slice, .char_slice_zero_term => return try engine.matchSlice(
             options,
             automaton,
             operation,
             single_char,
-            @as([]const Char, input),
+            input_kind == .char_slice_zero_term,
+            if (input_kind == .char_slice_zero_term)
+                @as([:0]const Char, input)
+            else
+                @as([]const Char, input),
         ),
         .byte_slice => {
             var fbs = std.io.fixedBufferStream(@as([]const u8, input));
@@ -304,20 +329,20 @@ pub fn startsWith(
 test "DFA match" {
     @setEvalBranchQuota(2_300);
     comptime {
-        std.debug.assert(startsWith(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abdeffffffffé😊yoyo"));
+        var fbs = std.io.fixedBufferStream("abdefé");
+        try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
+        //std.debug.assert(startsWith(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abdeffffffffé😊yoyo"));
     }
 
-    var fbs = std.io.fixedBufferStream("abdefé");
-    try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
+    //var fbs = std.io.fixedBufferStream("abdefé");
+    //try std.testing.expect(match(.{ .encoding = .utf8 }, "ab(def)*é|aghi|abz", fbs.reader()));
+    std.debug.assert(startsWith(.{ .encoding = .utf8 }, "ab(def*é|aghi|abz)😊", "abdeffffffffé😊yoyo"));
 }
 // TODO Reorganize files, only keep public interface in this file
 //   Flesh out structure of things, add `std.debug.todo`s
 // TODO Lots and lots of docs
-// TODO startsWithMatch is trivial
 //   We probably need our own writer type to test utf16le and u21
 //   Make a new test.zig file that refAllDecls's all files with tests and tests exposed api
 //   In this file, only test internals
 // TODO: Test that the ast is as expected, convert to automaton then test that the automaton
 //   is as expected
-
-// TODO: Experiment with creating the nfa directly instead of an intermediary AST

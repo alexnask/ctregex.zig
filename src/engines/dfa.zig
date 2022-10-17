@@ -86,7 +86,7 @@ pub inline fn matchSlice(
         ) catch return decode_err_value;
 
         if (zero_term and char == 0)
-            return false;
+            break;
 
         inline for (automaton.transitions) |t| {
             if (t.source == state and t.label == char) {

@@ -7,7 +7,7 @@ fn encodeStr(comptime encoding: ctregex.Encoding, comptime str: []const u8) []co
         .ascii, .utf8 => str,
         .utf16le => block: {
             var temp: [str.len]u16 = undefined;
-            break :block temp[0..std.unicode.utf8ToUtf16Le(&temp, str) catch unreachable];
+            break :block temp[0 .. std.unicode.utf8ToUtf16Le(&temp, str) catch unreachable];
         },
         .codepoint => block: {
             var temp: [str.len]u21 = undefined;
@@ -24,14 +24,14 @@ fn encodeStr(comptime encoding: ctregex.Encoding, comptime str: []const u8) []co
 
 fn testMatch(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const u8) !void {
     const encoded_str = comptime encodeStr(encoding, str);
-    expect((try ctregex.match(regex, .{.encoding = encoding}, encoded_str)) != null);
-    comptime expect((try ctregex.match(regex, .{.encoding = encoding}, encoded_str)) != null);
+    try expect((try ctregex.match(regex, .{ .encoding = encoding }, encoded_str)) != null);
+    comptime try expect((try ctregex.match(regex, .{ .encoding = encoding }, encoded_str)) != null);
 }
 
 fn testSearchInner(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const encoding.CharT(), comptime found: []const encoding.CharT()) !void {
-    const result = try ctregex.search(regex, .{.encoding = encoding}, str);
-    expect(result != null);
-    expect(std.mem.eql(encoding.CharT(), result.?.slice, found));
+    const result = try ctregex.search(regex, .{ .encoding = encoding }, str);
+    try expect(result != null);
+    try expect(std.mem.eql(encoding.CharT(), result.?.slice, found));
 }
 
 fn testSearch(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const u8, comptime found: []const u8) !void {
@@ -43,19 +43,19 @@ fn testSearch(comptime regex: []const u8, comptime encoding: ctregex.Encoding, c
 }
 
 fn testCapturesInner(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const encoding.CharT(), comptime captures: []const ?[]const encoding.CharT()) !void {
-    const result = try ctregex.match(regex, .{.encoding = encoding}, str);
-    expect(result != null);
+    const result = try ctregex.match(regex, .{ .encoding = encoding }, str);
+    try expect(result != null);
 
     const res_captures = &result.?.captures;
-    expect(res_captures.len == captures.len);
+    try expect(res_captures.len == captures.len);
 
     var idx: usize = 0;
     while (idx < captures.len) : (idx += 1) {
         if (res_captures[idx] == null) {
-            expect(captures[idx] == null);
+            try expect(captures[idx] == null);
         } else {
-            expect(captures[idx] != null);
-            expect(std.mem.eql(encoding.CharT(), res_captures[idx].?, captures[idx].?));
+            try expect(captures[idx] != null);
+            try expect(std.mem.eql(encoding.CharT(), res_captures[idx].?, captures[idx].?));
         }
     }
 }
@@ -86,15 +86,9 @@ test "regex matching" {
     try testMatch("[^a-z]{1,3}", .ascii, "ABC");
     try testMatch("Smile|(😀 | 😊){2}", .utf8, "😊😀");
 
-    try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "no capture", &[_]?[]const u8{
-        null, null
-    });
-    try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "no capture😿😻", &[_]?[]const u8{
-        "😻", null
-    });
-    try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "π = 3.14159...", &[_]?[]const u8{
-        null, "π = 3.14159..."
-    });
+    try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "no capture", &[_]?[]const u8{ null, null });
+    try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "no capture😿😻", &[_]?[]const u8{ "😻", null });
+    try testCaptures("(?:no\\ capture)([😀-🙏])*|(.*)", .utf8, "π = 3.14159...", &[_]?[]const u8{ null, "π = 3.14159..." });
 }
 
 test "regex searching" {

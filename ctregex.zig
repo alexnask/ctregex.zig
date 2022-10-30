@@ -190,27 +190,11 @@ const RegexParser = struct {
         const line_prefix = if (start_idx == 0) "\n" else "\n[...] ";
         const line_suffix = if (end_idx == parser.iterator.bytes.len) "\n" else " [...]\n";
 
-        const ArgTuple = struct {
-            tuple: anytype= .{},
-        };
-        var arg_list = ArgTuple{};
-        for (args) |arg| {
-            if (@TypeOf(arg) == ?u21) {
-                if (arg) |cp| {
-                    arg_list.tuple = arg_list.tuple ++ .{ctUtf8EncodeChar(cp)};
-                } else {
-                    arg_list.tuple = arg_list.tuple ++ .{"null"};
-                }
-            } else if (@TypeOf(arg) == u21) {
-                arg_list.tuple = arg_list.tuple ++ .{ctUtf8EncodeChar(arg)};
-            } else {
-                arg_list.tuple = arg_list.tuple ++ .{arg};
-            }
-        }
-
-        var error_buf: [128]u8 = undefined;
-        const error_slice = std.fmt.bufPrint(&error_buf, "error: {}: " ++ fmt, .{parser.iterator.i - 1} ++ arg_list.tuple) catch unreachable;
-        @compileError("\n" ++ error_slice ++ line_prefix ++ parser.iterator.bytes[start_idx..end_idx] ++ line_suffix ++ " " ** (start_spaces + line_prefix.len - 2) ++ "^");
+        var error_buf1: [128]u8 = undefined;
+        var error_buf2: [128]u8 = undefined;
+        const error_slice1 = std.fmt.bufPrint(&error_buf1, "error: {}: ", .{parser.iterator.i - 1}) catch unreachable;
+        const error_slice2 = std.fmt.bufPrint(&error_buf2, fmt, args) catch unreachable;
+        @compileError("\n" ++ error_slice1 ++ error_slice2 ++ line_prefix ++ parser.iterator.bytes[start_idx..end_idx] ++ line_suffix ++ " " ** (start_spaces + line_prefix.len - 2) ++ "^");
     }
 
     const ParseResult = struct {
@@ -339,7 +323,7 @@ const RegexParser = struct {
                 parser.raiseError("Invalid character '{}' after escape \\", .{parser.peek()});
             } else if (parser.peekOneOf(modifiers ++ .{'{'}) != null) {
                 if (str.len == 1) return Atom{ .literal = str };
-                if (str.len == 0) parser.raiseError("Stray modifier character '{}' applies to no expression", .{parser.peek()});
+                if (str.len == 0) parser.raiseError("Stray modifier character '{u}' applies to no expression", .{parser.peek()});
                 parser.iterator.i -= std.unicode.utf8CodepointSequenceLength(str[str.len - 1]) catch unreachable;
                 return Atom{ .literal = str[0 .. str.len - 1] };
             }
@@ -464,7 +448,7 @@ const RegexParser = struct {
                     break :block char;
                 }
                 parser.raiseError("Invalid character '{}' after escape \\", .{parser.peek()});
-            } else parser.consumeNotOneOf(special_brackets) orelse parser.raiseError("Expected a valid character after - in bracket rule, got character '{}'", .{c});
+            } else parser.consumeNotOneOf(special_brackets) orelse parser.raiseError("Expected a valid character after - in bracket rule, got character '{}'", .{parser.peek()});
 
             if (first_char >= second_char) {
                 parser.raiseError("Invalid range '{}-{}', start should be smaller than end", .{ first_char, second_char });
@@ -543,6 +527,8 @@ const RegexParser = struct {
     }
 
     fn charClassMinLen(comptime class: u21, comptime encoding: Encoding) usize {
+        _ = class;
+        _ = encoding;
         return 1;
     }
 
@@ -595,7 +581,7 @@ const RegexParser = struct {
             return switch (self) {
                 .grouped => |grouped| grouped.minLen(encoding),
                 .brackets => |brackets| brackets.minLen(encoding),
-                .any => |brackets| 1,
+                .any => 1,
                 .char_class => |class| charClassMinLen(class, encoding),
                 .literal => |codepoint_str| block: {
                     var len: usize = 0;
@@ -679,7 +665,7 @@ pub const Encoding = enum {
     utf16le,
     codepoint,
 
-    pub fn CharT(self: Encoding) type {
+    pub fn CharT(comptime self: Encoding) type {
         return switch (self) {
             .ascii, .utf8 => u8,
             .utf16le => u16,
@@ -850,6 +836,7 @@ inline fn matchSubExpr(comptime sub_expr: RegexParser.SubExpr, comptime options:
                     } else {
                         // TODO Using an inline while here crashes the compiler in codegen
                         var curr_additional_rep: usize = 0;
+                        _ = curr_additional_rep;
                         while (curr_rep < range.max) : (curr_rep += 1) {
                             if (try matchAtom(atom.data, options, str[curr_slice.len..], result)) |matched_slice| {
                                 curr_slice = str[0 .. matched_slice.len + curr_slice.len];
@@ -904,6 +891,8 @@ pub fn MatchResult(comptime regex: []const u8, comptime options: MatchOptions) t
             }
         }
 
+        const capture_names2 = capture_names;
+
         return struct {
             const Self = @This();
 
@@ -917,7 +906,7 @@ pub fn MatchResult(comptime regex: []const u8, comptime options: MatchOptions) t
             pub usingnamespace if (capture_len != 0)
                 struct {
                     pub fn capture(self: Self, comptime name: []const u8) ?[]const CharT {
-                        inline for (capture_names) |maybe_name, curr_idx| {
+                        inline for (capture_names2) |maybe_name, curr_idx| {
                             if (maybe_name) |curr_name| {
                                 if (comptime std.mem.eql(u8, name, curr_name))
                                     return self.captures[curr_idx];

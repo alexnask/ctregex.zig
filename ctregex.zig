@@ -304,7 +304,7 @@ const RegexParser = struct {
                 str = str ++ &[1]u21{c};
                 break :block;
             }
-            parser.raiseError("Invalid character '{}' after escape \\", .{parser.peek()});
+            parser.raiseError("Invalid character '{?}' after escape \\", .{parser.peek()});
         }
 
         charLoop: while (true) {

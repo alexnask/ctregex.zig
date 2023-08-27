@@ -57,7 +57,7 @@ fn ctEncode(comptime str: []const u21, comptime encoding: Encoding) []const enco
     for (str) |c| {
         switch (encoding) {
             .ascii => {
-                result[idx] = @truncate(u8, c);
+                result[idx] = @truncate(c);
                 idx += 1;
             },
             .utf8 => idx += std.unicode.utf8Encode(c, result[idx..]) catch unreachable,
@@ -304,7 +304,7 @@ const RegexParser = struct {
                 str = str ++ &[1]u21{c};
                 break :block;
             }
-            parser.raiseError("Invalid character '{}' after escape \\", .{parser.peek()});
+            parser.raiseError("Invalid character '{?}' after escape \\", .{parser.peek()});
         }
 
         charLoop: while (true) {
@@ -337,15 +337,15 @@ const RegexParser = struct {
     fn parseAsciiIdent(comptime parser: *RegexParser) []const u8 {
         var c = parser.peek() orelse parser.raiseError("Expected ascii identifier", .{});
         if (c > 127) parser.raiseError("Expected ascii character in identifier, got '{}'", .{c});
-        if (c != '_' and !std.ascii.isAlpha(@truncate(u8, c))) {
+        if (c != '_' and !std.ascii.isAlpha(@as(u8, @truncate(c)))) {
             parser.raiseError("Identifier must start with '_' or a letter, got '{}''", .{c});
         }
-        var res: []const u8 = &[1]u8{@truncate(u8, parser.iterator.nextCodepoint() orelse unreachable)};
+        var res: []const u8 = &[1]u8{@as(u8, @truncate(parser.iterator.nextCodepoint() orelse unreachable))};
         readChars: while (true) {
             c = parser.peek() orelse break :readChars;
-            if (c > 127 or (c != '_' and !std.ascii.isAlNum(@truncate(u8, c))))
+            if (c > 127 or (c != '_' and !std.ascii.isAlNum(@as(u8, @truncate(c)))))
                 break :readChars;
-            res = res ++ &[1]u8{@truncate(u8, parser.iterator.nextCodepoint() orelse unreachable)};
+            res = res ++ &[1]u8{@as(u8, @truncate(parser.iterator.nextCodepoint() orelse unreachable))};
         }
         return res;
     }
@@ -356,11 +356,11 @@ const RegexParser = struct {
 
     fn maybeParseNaturalNum(comptime parser: *RegexParser) ?usize {
         var c = parser.peek() orelse return null;
-        if (c > 127 or !std.ascii.isDigit(@truncate(u8, c))) return null;
+        if (c > 127 or !std.ascii.isDigit(@as(u8, @truncate(c)))) return null;
         var res: usize = (parser.iterator.nextCodepoint() orelse unreachable) - '0';
         readChars: while (true) {
             c = parser.peek() orelse break :readChars;
-            if (c > 127 or !std.ascii.isDigit(@truncate(u8, c))) break :readChars;
+            if (c > 127 or !std.ascii.isDigit(@as(u8, @truncate(c)))) break :readChars;
             res = res * 10 + ((parser.iterator.nextCodepoint() orelse unreachable) - '0');
         }
         return res;
@@ -548,7 +548,7 @@ const RegexParser = struct {
             const lhs_len = self.lhs.minLen(encoding);
             if (self.rhs) |rhs| {
                 const rhs_len = rhs.minLen(encoding);
-                return std.math.min(lhs_len, rhs_len);
+                return @min(lhs_len, rhs_len);
             }
             return lhs_len;
         }
@@ -630,7 +630,7 @@ const RegexParser = struct {
         fn ctStr(comptime self: Brackets) []const u8 {
             var str: []const u8 = "[";
             if (self.is_exclusive) str = str ++ "<not> ";
-            for (self.rules) |rule, idx| {
+            for (self.rules, 0..) |rule, idx| {
                 if (idx > 0) str = str ++ " ";
                 str = str ++ switch (rule) {
                     .char => |c| ctUtf8EncodeChar(c),
@@ -885,7 +885,7 @@ pub fn MatchResult(comptime regex: []const u8, comptime options: MatchOptions) t
     if (RegexParser.parse(regex)) |parsed| {
         const capture_len = parsed.captures.len;
         var capture_names: [capture_len]?[]const u8 = undefined;
-        for (parsed.captures) |capt, idx| {
+        for (parsed.captures, 0..) |capt, idx| {
             if (capt.capture_info) |info| {
                 capture_names[idx] = info.name;
             }
@@ -906,7 +906,7 @@ pub fn MatchResult(comptime regex: []const u8, comptime options: MatchOptions) t
             pub usingnamespace if (capture_len != 0)
                 struct {
                     pub fn capture(self: Self, comptime name: []const u8) ?[]const CharT {
-                        inline for (capture_names2) |maybe_name, curr_idx| {
+                        inline for (capture_names2, 0..) |maybe_name, curr_idx| {
                             if (maybe_name) |curr_name| {
                                 if (comptime std.mem.eql(u8, name, curr_name))
                                     return self.captures[curr_idx];

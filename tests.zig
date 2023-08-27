@@ -63,7 +63,7 @@ fn testCapturesInner(comptime regex: []const u8, comptime encoding: ctregex.Enco
 fn testCaptures(comptime regex: []const u8, comptime encoding: ctregex.Encoding, comptime str: []const u8, comptime captures: []const ?[]const u8) !void {
     const encoded_str = comptime encodeStr(encoding, str);
     comptime var encoded_captures: [captures.len]?[]const encoding.CharT() = undefined;
-    inline for (captures) |capt, idx| {
+    inline for (captures, 0..) |capt, idx| {
         if (capt) |capt_slice| {
             encoded_captures[idx] = comptime encodeStr(encoding, capt_slice);
         } else {
